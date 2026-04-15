@@ -205,6 +205,20 @@ def _peek_stable_nopecha_credit_left() -> str:
         return str(max(0, int(_nopecha_run_credit_left)))
 
 
+SHADOW_DOM_PIERCING_SCRIPT = """
+    const shadowScan = (root = document) => {
+        let found = Array.from(root.querySelectorAll('input, textarea, select'));
+        const all = root.querySelectorAll('*');
+        for (const el of all) {
+            if (el.shadowRoot) {
+                found = found.concat(shadowScan(el.shadowRoot));
+            }
+        }
+        return found;
+    };
+"""
+
+
 def _consume_nopecha_credit_for_row(captcha_status: str) -> tuple[str, str]:
     global _nopecha_run_credit_left
     row_used = _nopecha_solves_consumed(captcha_status) * NOPECHA_CREDIT_PER_SOLVE
@@ -2044,6 +2058,9 @@ CONTACT_DISCOVERY_KEYWORDS = [
     "get-in-touch", "getintouch", "reach-us", "reach_us",
     "touch", "inquiry", "enquiry", "support", "help",
     "write-to-us", "talk-to-us", "connect", "reach",
+    "message", "sales", "billing", "question", "feedback",
+    "request", "demo", "enquire", "inquire", "support-contact",
+    "customer-service", "get-started", "start-conversation"
 ]
 
 CONTACT_DISCOVERY_COMMON_PATHS = [
@@ -2051,6 +2068,9 @@ CONTACT_DISCOVERY_COMMON_PATHS = [
     "/get-in-touch", "/reach-us", "/inquiry", "/enquiry",
     "/support/contact", "/about/contact", "/pages/contact",
     "/help/contact", "/connect", "/about-us/contact", "/reach", "/touch",
+    "/message", "/message-us", "/write-to-us", "/talk-to-us",
+    "/support/ticket", "/help-center", "/customer-care",
+    "/sales-contact", "/request-info", "/inquire-now", "/demo-request"
 ]
 
 _CONTACT_LINK_EXCLUDE_HINTS = (
@@ -2141,6 +2161,41 @@ def _contact_discovery_timeout_ms(deadline_monotonic: float, default_ms: int) ->
     return min(int(default_ms), remaining_ms)
 
 
+async def _count_form_fields(page_or_frame) -> int:
+    res = await page_or_frame.evaluate("""() => {
+            const shadowScan = (root) => {
+                let found = Array.from(root.querySelectorAll('input, textarea, select'));
+                const all = root.querySelectorAll('*');
+                for (const el of all) {
+                    if (el.shadowRoot) {
+                        found = found.concat(shadowScan(el.shadowRoot));
+                    }
+                }
+                return found;
+            };
+
+            const controls = shadowScan(document).filter(el => {
+                const tag = (el.tagName || '').toLowerCase();
+                const type = String(el.type || '').toLowerCase();
+                if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search', 'file'].includes(type)) return false;
+
+                const nm = String(el.name || el.id || el.placeholder || '').toLowerCase();
+                if (/\bsearch\b|sf_s|zip.?code|keyword|flexdata/.test(nm)) return false;
+                if (/(wpcf7_ak_hp|honeypot|honey[_-]?pot|ak_hp|bot.?trap|leave.?blank|do.?not.?fill|nospam)/.test(nm)) return false;
+                return true;
+            });
+            
+            if (controls.length === 0) {
+                // Last ditch: any inputs at all that aren't hidden
+                return shadowScan(document).filter(el => 
+                    el.tagName === 'INPUT' && el.type !== 'hidden' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
+                ).length;
+            }
+            return controls.length;
+        }""")
+    return int(res or 0)
+
+
 async def _has_form_signal_for_discovery(page) -> bool:
     min_fields = int(CONTACT_DISCOVERY_MIN_FIELDS)
     js_checked = False
@@ -2148,6 +2203,18 @@ async def _has_form_signal_for_discovery(page) -> bool:
     try:
         stats = await page.evaluate("""(cfg) => {
             const minFields = Math.max(2, Number(cfg?.minFields || 3));
+            
+            const shadowScan = (root) => {
+                let found = Array.from(root.querySelectorAll('input, textarea, select'));
+                const all = root.querySelectorAll('*');
+                for (const el of all) {
+                    if (el.shadowRoot) {
+                        found = found.concat(shadowScan(el.shadowRoot));
+                    }
+                }
+                return found;
+            };
+
             const isVisible = (el) => {
                 if (!el) return false;
                 const r = el.getBoundingClientRect();
@@ -2156,7 +2223,7 @@ async def _has_form_signal_for_discovery(page) -> bool:
                 return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
             };
 
-            const controls = Array.from(document.querySelectorAll('input, textarea, select')).filter(el => {
+            const controls = shadowScan(document).filter(el => {
                 const tag = String(el.tagName || '').toLowerCase();
                 const type = String(el.type || '').toLowerCase();
                 if (tag === 'input' && ['hidden','submit','button','image','reset','search','file'].includes(type)) return false;
@@ -2549,9 +2616,13 @@ async def find_form_target(page, url):
     print(f"   [FormFinder] S5: Contact links...")
     contact_link_selectors = [
         "a[href*='contact' i]","a[href*='reach' i]","a[href*='touch' i]","a[href*='connect' i]",
+        "a[href*='message' i]","a[href*='support' i]","a[href*='inquiry' i]","a[href*='enquiry' i]",
         "a:has-text('Contact Us')","a:has-text('Contact')",
         "a:has-text('Get in Touch')","a:has-text('Write to Us')",
         "a:has-text('Connect')","a:has-text('Talk to a')",
+        "a:has-text('Message Us')","a:has-text('Send a Message')",
+        "a:has-text('Inquire')","a:has-text('Enquire')",
+        "button:has-text('Contact')", "button:has-text('Message')",
         "nav a[href*='contact' i]","footer a[href*='contact' i]","nav a[href*='connect' i]",
     ]
     for sel in contact_link_selectors:
@@ -5956,6 +6027,123 @@ async def handle_checkboxes(target, company_name="") -> int:
     return fixed
 
 
+async def ensure_all_required_fields_filled(page, target, company_name="", url="", pitch="", subject="") -> int:
+    """
+    Final universal pass to ensure every required field in Shadow DOM or frames 
+    is filled before submission. Pierces Shadow DOM to find custom components.
+    """
+    fixed = 0
+    sources = [target]
+    if target != page:
+        sources.append(page)
+    for frame in page.frames:
+        try:
+            if frame.url and frame.url.startswith("http") and frame not in sources:
+                sources.append(frame)
+        except Exception:
+            continue
+
+    for src in sources:
+        try:
+            changed = await src.evaluate("""(cfg) => {
+                """ + SHADOW_DOM_PIERCING_SCRIPT + """
+
+                const dispatch = (el) => {
+                    ['input', 'change', 'blur', 'click'].forEach(evt => {
+                        try { el.dispatchEvent(new Event(evt, { bubbles: true })); } catch (e) {}
+                    });
+                };
+
+                const norm = (s) => String(s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+
+                const labelText = (el) => {
+                    try {
+                        if (el.id) {
+                            const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                            if (lbl) return String(lbl.innerText || lbl.textContent || '').trim();
+                        }
+                    } catch (e) {}
+                    const wrap = el.closest('label');
+                    if (wrap) return String(wrap.innerText || wrap.textContent || '').trim();
+                    return '';
+                };
+
+                let n = 0;
+                const controls = shadowScan(document);
+
+                for (const el of controls) {
+                    if (el.disabled || el.readOnly) continue;
+                    
+                    const tag = (el.tagName || '').toLowerCase();
+                    const type = String(el.type || '').toLowerCase();
+                    const val = String(el.value || '').trim();
+                    
+                    // Already filled?
+                    if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+                        if (el.checked) continue;
+                    } else {
+                        if (val.length > 0) continue;
+                    }
+
+                    // Is it required?
+                    let invalid = false;
+                    try { invalid = (typeof el.matches === 'function') && el.matches(':invalid'); } catch (e) {}
+                    const required = !!el.required || String(el.getAttribute('aria-required') || '').toLowerCase() === 'true';
+                    
+                    const parent = el.parentElement;
+                    const hasAsterisk = (parent && /(?:\\*|required)/i.test(parent.innerText || '')) || (parent && parent.parentElement && /(?:\\*|required)/i.test(parent.parentElement.innerText || ''));
+                    const label = labelText(el);
+                    const labelAsterisk = /(?:\\*|required)/i.test(label);
+
+                    if (!(required || invalid || hasAsterisk || labelAsterisk)) continue;
+
+                    // It is required and empty. Fill it.
+                    if (tag === 'select') {
+                        const ops = Array.from(el.options).filter(o => o.value && !/select|choose|placeholder|none/i.test(o.text));
+                        if (ops.length > 0) {
+                            el.value = ops[0].value;
+                            dispatch(el);
+                            n++;
+                        }
+                    } else if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+                        el.checked = true;
+                        dispatch(el);
+                        n++;
+                    } else {
+                        // Text input heuristics
+                        const meta = (label + ' ' + (el.name||'') + ' ' + (el.id||'') + ' ' + (el.placeholder||'')).toLowerCase();
+                        let fillVal = 'N/A';
+                        if (meta.includes('organization') || meta.includes('company') || meta.includes('business')) fillVal = cfg.companyName || 'Business Inquiry';
+                        else if (meta.includes('website') || meta.includes('domain') || meta.includes('url')) fillVal = cfg.url || 'http://example.com';
+                        else if (meta.includes('industry')) fillVal = 'Technology';
+                        else if (meta.includes('role') || meta.includes('title')) fillVal = 'Manager';
+                        else if (meta.includes('country')) fillVal = 'United States';
+                        else if (meta.includes('city')) fillVal = 'New York';
+                        else if (meta.includes('state')) fillVal = 'NY';
+                        else if (meta.includes('subject')) fillVal = cfg.subject || 'General Inquiry';
+                        else if (meta.includes('how did you hear')) fillVal = 'Google Search';
+                        else if (meta.includes('phone') || meta.includes('mobile')) fillVal = '+15550199999';
+                        else if (meta.includes('name')) fillVal = 'John Doe';
+                        else if (meta.includes('email') || meta.includes('mail')) fillVal = 'contact@example.com';
+                        else if (meta.includes('message') || meta.includes('comment') || meta.includes('body')) fillVal = cfg.pitch || 'Interested in connecting.';
+                        
+                        el.value = fillVal;
+                        dispatch(el);
+                        n++;
+                    }
+                }
+                return n;
+            }""", {"companyName": company_name, "url": url, "pitch": pitch, "subject": subject})
+            fixed += int(changed or 0)
+        except Exception:
+            continue
+
+    if fixed > 0:
+        print(f"   [{company_name[:20]}] [UniversalAuditor] Filled {fixed} missing required field(s)")
+    return fixed
+
+
 # ============================================================
 #   SUBMIT
 # ============================================================
@@ -7940,6 +8128,10 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             phone_country_fixed = 0
         consent_fixed = await ensure_required_consent_checks(page, target, company_name)
         consent_heur_fixed = await ensure_consent_by_heuristics(page, target, company_name)
+        
+        # Universal Auditor: Final pass to ensure all required fields in shadow DOM or frames are filled.
+        universal_fixed = await ensure_all_required_fields_filled(page, target, company_name, url, pitch, subject)
+        
         captured_fields = await _capture_filled_form_values(page, target, max_items=90)
         for field_key, field_value in captured_fields.items():
             form_data.setdefault(field_key, field_value)
@@ -7962,6 +8154,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             form_data["_required_consents"] = f"auto:{consent_fixed}"
         if consent_heur_fixed > 0:
             form_data["_consent_heuristics"] = f"auto:{consent_heur_fixed}"
+        if universal_fixed > 0:
+            form_data["_universal_required_fix"] = f"auto:{universal_fixed}"
         await page.evaluate("""() => {
             if (document.body) window.scrollTo(0, document.body.scrollHeight);
         }""")
