@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: outreach_backend
+    restart: always
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    shm_size: '2gb'
