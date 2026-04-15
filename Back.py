@@ -193,7 +193,7 @@ def _init_db() -> None:
 
 			# Migration: add url_key column to campaign_contacts if missing
 			cur.execute("""
-				DO  BEGIN
+				DO $$ BEGIN
 					IF NOT EXISTS (
 						SELECT 1 FROM information_schema.columns
 						WHERE table_name = 'campaign_contacts' AND column_name = 'url_key'
@@ -201,17 +201,17 @@ def _init_db() -> None:
 						ALTER TABLE campaign_contacts ADD COLUMN url_key TEXT DEFAULT '';
 						UPDATE campaign_contacts SET url_key = md5(contact_url) WHERE url_key = '';
 					END IF;
-				END ;
+				END $$;
 			""")
 			# Migration: add unique constraint for campaign_id and url_key if missing
 			cur.execute("""
-				DO  BEGIN
+				DO $$ BEGIN
 					IF NOT EXISTS (
 						SELECT 1 FROM pg_constraint WHERE conname = 'campaign_contacts_campaign_id_url_key_key'
 					) THEN
 						ALTER TABLE campaign_contacts ADD CONSTRAINT campaign_contacts_campaign_id_url_key_key UNIQUE (campaign_id, url_key);
 					END IF;
-				END ;
+				END $$;
 			""")
 			# Migration: add schedule_day column to campaigns if missing
 			cur.execute("""
