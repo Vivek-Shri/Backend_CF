@@ -1,0 +1,20 @@
+flask
+gunicorn
+werkzeug
+fastapi
+uvicorn
+psycopg2-binary
+
+# scraping
+playwright
+requests
+
+# parsing
+beautifulsoup4
+
+# google sheets
+gspread
+oauth2client
+
+# openai
+openai
