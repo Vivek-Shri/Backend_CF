@@ -277,6 +277,7 @@ def _init_db() -> None:
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS error_detail TEXT DEFAULT ''")
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS bandwidth_kb NUMERIC(10,2) DEFAULT 0")
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT ''")
+			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS filled_data JSONB")
 
 			# Global submitted contacts table for cross-campaign deduplication
 			cur.execute("""
@@ -601,8 +602,8 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 					status, submitted, confirmation_msg,
 					form_found, captcha_present, captcha_type, captcha_result,
 					http_status_code, error_detail, bandwidth_kb, domain,
-					created_at, fields_filled_data
-				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					created_at, fields_filled_data, filled_data
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				campaign_id,
 				run_id,
@@ -621,7 +622,8 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 				parsed_result.get("bandwidthKb", 0),
 				parsed_result.get("domain", ""),
 				_utc_now_iso(),
-				parsed_result.get("fieldsFilled", "")
+				parsed_result.get("fieldsFilled", ""),
+				json.dumps(parsed_result.get("fieldsFilledData") or {})
 			))
 
 			is_submitted = str(parsed_result.get("submitted") or "").strip().lower() == "yes"
@@ -1318,6 +1320,7 @@ def _map_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 		"errorDetail": str(payload.get("error_detail") or ""),
 		"bandwidthKb": float(payload.get("bandwidth_kb") or 0),
 		"domain": str(payload.get("domain") or ""),
+		"fieldsFilledData": payload.get("fields_filled_data") or {},
 	}
 
 
@@ -2919,7 +2922,7 @@ def outreach_status(request: Request) -> dict:
 					cur.execute("""
 						SELECT company_name, contact_url, status, submitted, confirmation_msg,
 						       captcha_present, captcha_type, captcha_result, form_found,
-						       bandwidth_kb, error_detail, fields_filled_data
+						       bandwidth_kb, error_detail, fields_filled_data, filled_data
 						FROM outreach_results WHERE run_id = %s
 					""", (run_id_val,))
 					for row in cur.fetchall():
@@ -2943,6 +2946,7 @@ def outreach_status(request: Request) -> dict:
 							"captchaPresent": captcha_present_val,
 							"formFound": bool(row["form_found"]),
 							"fieldsFilled": row["fields_filled_data"] or "",
+							"fieldsFilledData": row["filled_data"] if row["filled_data"] else {},
 							"bandwidthKb": float(row["bandwidth_kb"] or 0),
 							"errorDetail": row["error_detail"] or "",
 						})
