@@ -190,6 +190,29 @@ def _init_db() -> None:
 					END IF;
 				END $$;
 			""")
+
+			# Migration: add url_key column to campaign_contacts if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaign_contacts' AND column_name = 'url_key'
+					) THEN
+						ALTER TABLE campaign_contacts ADD COLUMN url_key TEXT DEFAULT '';
+						UPDATE campaign_contacts SET url_key = md5(contact_url) WHERE url_key = '';
+					END IF;
+				END $$;
+			""")
+			# Migration: add unique constraint for campaign_id and url_key if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM pg_constraint WHERE conname = 'campaign_contacts_campaign_id_url_key_key'
+					) THEN
+						ALTER TABLE campaign_contacts ADD CONSTRAINT campaign_contacts_campaign_id_url_key_key UNIQUE (campaign_id, url_key);
+					END IF;
+				END $$;
+			""")
 			# Migration: add schedule_day column to campaigns if missing
 			cur.execute("""
 				DO $$ BEGIN
@@ -277,7 +300,6 @@ def _init_db() -> None:
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS error_detail TEXT DEFAULT ''")
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS bandwidth_kb NUMERIC(10,2) DEFAULT 0")
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT ''")
-			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS filled_data JSONB")
 
 			# Global submitted contacts table for cross-campaign deduplication
 			cur.execute("""
@@ -442,6 +464,19 @@ def _init_db() -> None:
 			cur.execute("CREATE INDEX IF NOT EXISTS idx_new_logs_contact ON submission_logs(contact_id)")
 			cur.execute("CREATE INDEX IF NOT EXISTS idx_new_logs_campaign ON submission_logs(campaign_id)")
 
+			# ── Migration: Step tracking for multi-step campaigns ──
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'campaign_contacts' AND column_name = 'current_step_index') THEN
+						ALTER TABLE campaign_contacts ADD COLUMN current_step_index INTEGER DEFAULT 0;
+					END IF;
+					IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'campaign_contacts' AND column_name = 'next_attempt_at') THEN
+						ALTER TABLE campaign_contacts ADD COLUMN next_attempt_at TIMESTAMPTZ DEFAULT NOW();
+					END IF;
+				END $$;
+			""")
+			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS step_index INTEGER DEFAULT 0")
+
 			conn.commit()
 		_db_pool.putconn(conn)
 		_db_available = True
@@ -602,8 +637,8 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 					status, submitted, confirmation_msg,
 					form_found, captcha_present, captcha_type, captcha_result,
 					http_status_code, error_detail, bandwidth_kb, domain,
-					created_at, fields_filled_data, filled_data
-				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					created_at, fields_filled_data
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				campaign_id,
 				run_id,
@@ -622,8 +657,7 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 				parsed_result.get("bandwidthKb", 0),
 				parsed_result.get("domain", ""),
 				_utc_now_iso(),
-				parsed_result.get("fieldsFilled", ""),
-				json.dumps(parsed_result.get("fieldsFilledData") or {})
+				parsed_result.get("fieldsFilled", "")
 			))
 
 			is_submitted = str(parsed_result.get("submitted") or "").strip().lower() == "yes"
@@ -1320,10 +1354,6 @@ def _map_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 		"errorDetail": str(payload.get("error_detail") or ""),
 		"bandwidthKb": float(payload.get("bandwidth_kb") or 0),
 		"domain": str(payload.get("domain") or ""),
-		"fieldsFilledData": payload.get("fields_filled_data") or {},
-		"strategy": str(payload.get("strategy") or "N/A"),
-		"discoveryMethod": str(payload.get("discovery_method") or "direct"),
-		"detectedFormUrl": str(payload.get("detected_form_url") or ""),
 	}
 
 
@@ -1604,7 +1634,70 @@ def _build_persona_env(persona: dict[str, Any] | None) -> dict[str, str]:
 	if full_name:
 		env["MY_FULL_NAME"] = full_name
 
-	return env
+
+def _advance_contact_step(campaign_id: str, contact_url: str, steps: list) -> None:
+	"""After successful form submission, advance the contact to the next campaign step.
+	If the next step has a delay (type='normal'), schedule it for the future."""
+	if not _db_available or not _db_pool or not campaign_id or not contact_url:
+		return
+	conn = _db_get_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute(
+				"SELECT current_step_index FROM campaign_contacts WHERE campaign_id = %s AND url_key = %s",
+				(campaign_id, contact_url)
+			)
+			row = cur.fetchone()
+			if not row:
+				return
+			current = row[0] or 0
+			next_idx = current + 1
+
+			# Filter to only enabled steps
+			enabled_steps = [s for s in steps if isinstance(s, dict) and s.get("enabled") is not False]
+
+			if next_idx >= len(enabled_steps):
+				# All steps complete for this contact
+				cur.execute(
+					"UPDATE campaign_contacts SET current_step_index = %s "
+					"WHERE campaign_id = %s AND url_key = %s",
+					(next_idx, campaign_id, contact_url)
+				)
+			else:
+				next_step = enabled_steps[next_idx]
+				delay_val = int(next_step.get("delayValue", 0) or 0)
+				delay_unit = str(next_step.get("delayUnit", "days") or "days").strip().lower()
+
+				if next_step.get("type") == "immediate" or delay_val <= 0:
+					cur.execute(
+						"UPDATE campaign_contacts SET current_step_index = %s, next_attempt_at = NOW() "
+						"WHERE campaign_id = %s AND url_key = %s",
+						(next_idx, campaign_id, contact_url)
+					)
+				else:
+					# Schedule for later
+					if delay_unit == "hours":
+						interval_sql = f"{delay_val} hours"
+					else:
+						interval_sql = f"{delay_val} days"
+					cur.execute(
+						f"UPDATE campaign_contacts SET current_step_index = %s, "
+						f"next_attempt_at = NOW() + INTERVAL '{interval_sql}' "
+						f"WHERE campaign_id = %s AND url_key = %s",
+						(next_idx, campaign_id, contact_url)
+					)
+			conn.commit()
+			print(f"[Steps] Advanced {contact_url} to step {next_idx} in campaign {campaign_id}")
+	except Exception as exc:
+		print(f"[Steps] Warning: failed to advance step for {contact_url}: {exc}")
+		try:
+			conn.rollback()
+		except Exception:
+			pass
+	finally:
+		_db_put_conn(conn)
+
+
 
 
 def _append_log(line: str, run_id: str) -> None:
@@ -1637,6 +1730,22 @@ def _append_log(line: str, run_id: str) -> None:
 	_db_append_log(run_id, clean)
 	if parsed_result is not None:
 		_db_record_result(run_id, campaign_id, user_id, parsed_result)
+		# Advance contact to next campaign step on successful submission
+		is_success = str(parsed_result.get("submitted") or "").strip().lower() == "yes"
+		if is_success and campaign_id:
+			contact_url = _normalize_url_key(str(parsed_result.get("contactUrl") or ""))
+			# Retrieve steps from the persona env that was passed at run start
+			steps_json = None
+			with _state_lock:
+				st = _active_runs.get(run_id)
+				if st:
+					steps_json = st.get("campaign_steps")
+			if steps_json and contact_url:
+				try:
+					steps_list = json.loads(steps_json) if isinstance(steps_json, str) else steps_json
+					_advance_contact_step(campaign_id, contact_url, steps_list)
+				except Exception as exc:
+					print(f"[Steps] Warning: step advance parse error: {exc}")
 	if processed_leads is not None:
 		with _state_lock:
 			state = _active_runs.get(run_id)
@@ -2212,7 +2321,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 			_safe_trim(item.get("notes")),
 			now,
 			now,
-			user_id
+			(int(user_id) if user_id and str(user_id).isdigit() else None)
 		))
 	
 	print(f"[Bulk] Campaign {campaign_id}: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2232,7 +2341,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 				if existing_keys:
 					# We have duplicates! Let's get the detailed info for the 409 response
 					placeholders2 = ",".join(["%s"] * len(existing_keys))
-					cur.execute(f"SELECT c.url_key, c.company_name, c.campaign_id, cmp.name FROM campaign_contacts c JOIN campaigns cmp ON c.campaign_id = cmp.campaign_id WHERE c.url_key IN ({placeholders2}) AND c.campaign_id != %s", (*existing_keys, campaign_id))
+					cur.execute(f"SELECT c.url_key, c.company_name, c.campaign_id, cmp.name FROM campaign_contacts c JOIN campaigns cmp ON c.campaign_id = cmp.id WHERE c.url_key IN ({placeholders2}) AND c.campaign_id != %s", (*existing_keys, campaign_id))
 					
 					duplicate_details = []
 					for row in cur.fetchall():
@@ -2268,6 +2377,10 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 	except HTTPException:
 		raise
 	except Exception as exc:
+		import traceback
+		import sys
+		traceback.print_exc(file=sys.stdout)
+		sys.stdout.flush()
 		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
 	finally:
 		_db_put_conn(conn)
@@ -2533,7 +2646,7 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 			"", "", "", # location, industry, notes
 			now,
 			now,
-			user_id or None
+			(int(user_id) if user_id and str(user_id).isdigit() else None)
 		))
 	
 	print(f"[Bulk] Global: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2556,6 +2669,10 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 		print(f"[Bulk] Global: inserted={inserted} db_dup_skipped={len(docs_to_insert) - inserted}")
 		return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}.", "inserted": inserted, "skipped_no_url": skipped_no_url, "skipped_invalid": skipped_invalid, "skipped_dup": skipped_dup}
 	except Exception as exc:
+		import traceback
+		import sys
+		traceback.print_exc(file=sys.stdout)
+		sys.stdout.flush()
 		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
 	finally:
 		_db_put_conn(conn)
@@ -2782,6 +2899,8 @@ def start_outreach(request: Request, payload: OutreachStartRequest) -> dict:
 		state["campaign_id"] = campaign_id or None
 		state["campaign_title"] = campaign_title or None
 		state["user_id"] = user_id or None
+		# Store campaign steps for multi-step advancement logic
+		state["campaign_steps"] = persona_payload.get("steps") if isinstance(persona_payload, dict) else None
 		state["logs"].append(f"[{started_at}] Started: {' '.join(cmd)}")
 		if dedupe_by_domain:
 			state["logs"].append(f"[{started_at}] Domain-level dedupe enabled: max {max_urls_per_domain} URL(s) per domain")
@@ -2925,7 +3044,7 @@ def outreach_status(request: Request) -> dict:
 					cur.execute("""
 						SELECT company_name, contact_url, status, submitted, confirmation_msg,
 						       captcha_present, captcha_type, captcha_result, form_found,
-						       bandwidth_kb, error_detail, fields_filled_data, filled_data
+						       bandwidth_kb, error_detail, fields_filled_data
 						FROM outreach_results WHERE run_id = %s
 					""", (run_id_val,))
 					for row in cur.fetchall():
@@ -2949,7 +3068,6 @@ def outreach_status(request: Request) -> dict:
 							"captchaPresent": captcha_present_val,
 							"formFound": bool(row["form_found"]),
 							"fieldsFilled": row["fields_filled_data"] or "",
-							"fieldsFilledData": row["filled_data"] if row["filled_data"] else {},
 							"bandwidthKb": float(row["bandwidth_kb"] or 0),
 							"errorDetail": row["error_detail"] or "",
 						})
@@ -3089,22 +3207,12 @@ async def stop_outreach(
 		if proc is None or (proc.poll() is not None and not (state.get("reader_thread") and state["reader_thread"].is_alive())):
 			raise HTTPException(status_code=409, detail="No running Outreach process found")
 
-		# Create an abort file for the outreach scraper to gracefully shut down itself and browser
-		abort_file = BASE_DIR / ".outreach-runs" / f"{target_run_id}.abort"
-		try:
-			abort_file.touch(exist_ok=True)
-		except Exception:
-			pass
-
 		# Use the reliable `process` to send the signal, if it is still alive
 		if proc.poll() is None:
 			try:
-				proc.terminate() # SIGTERM allows Python to catch it
+				proc.kill()
 			except Exception:
-				try:
-					proc.kill()
-				except Exception:
-					pass
+				pass
 		state["status"] = "stopping"
 		state["logs"].append(f"[{_utc_now_iso()}] Stop requested")
 		_db_update_run_state(
