@@ -8486,6 +8486,11 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 
         await asyncio.sleep(random.uniform(0.5, 1.2))
 
+        # â”€â”€ Real-time Capture: Store field values BEFORE clicking submit to avoid loss via redirect â”€â”€
+        latest_captured_fields = await _capture_filled_form_values(page, target, max_items=90)
+        for field_key, field_value in latest_captured_fields.items():
+            form_data.setdefault(field_key, field_value)
+
         pre_url = page.url
         submission_probe = _new_submission_probe(bw)
         submitted, submit_method = await click_submit(target, page, company_name)
