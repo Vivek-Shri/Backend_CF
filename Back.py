@@ -2321,7 +2321,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 			_safe_trim(item.get("notes")),
 			now,
 			now,
-			user_id
+			user_id or None
 		))
 	
 	print(f"[Bulk] Campaign {campaign_id}: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2377,6 +2377,8 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 	except HTTPException:
 		raise
 	except Exception as exc:
+		import traceback
+		traceback.print_exc()
 		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
 	finally:
 		_db_put_conn(conn)
@@ -2665,6 +2667,8 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 		print(f"[Bulk] Global: inserted={inserted} db_dup_skipped={len(docs_to_insert) - inserted}")
 		return {"message": f"Successfully processed {len(docs_to_insert)} contacts. Inserted {inserted}.", "inserted": inserted, "skipped_no_url": skipped_no_url, "skipped_invalid": skipped_invalid, "skipped_dup": skipped_dup}
 	except Exception as exc:
+		import traceback
+		traceback.print_exc()
 		raise HTTPException(status_code=500, detail=f"Unable to process bulk contacts: {exc}")
 	finally:
 		_db_put_conn(conn)
