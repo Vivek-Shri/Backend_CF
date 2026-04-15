@@ -2060,7 +2060,7 @@ CONTACT_DISCOVERY_MAX_SECONDS = max(6, _env_int("CONTACT_DISCOVERY_MAX_SECONDS",
 CONTACT_DISCOVERY_NAV_TIMEOUT_MS = max(2000, _env_int("CONTACT_DISCOVERY_NAV_TIMEOUT_MS", 9000))
 CONTACT_DISCOVERY_MAX_PATH_TRIES = max(2, min(16, _env_int("CONTACT_DISCOVERY_MAX_PATH_TRIES", 8)))
 CONTACT_DISCOVERY_MAX_LINK_TRIES = max(1, min(10, _env_int("CONTACT_DISCOVERY_MAX_LINK_TRIES", 4)))
-CONTACT_DISCOVERY_STEP_PAUSE_MS = max(0, min(1200, _env_int("CONTACT_DISCOVERY_STEP_PAUSE_MS", 350)))
+CONTACT_DISCOVERY_STEP_PAUSE_MS = max(0, min(2000, _env_int("CONTACT_DISCOVERY_STEP_PAUSE_MS", 800)))
 CONTACT_DISCOVERY_MIN_FIELDS = max(2, min(8, _env_int("CONTACT_DISCOVERY_MIN_FIELDS", 2)))
 
 
@@ -2147,7 +2147,12 @@ async def _has_form_signal_for_discovery(page) -> bool:
             const isVisible = (el) => {
                 if (!el) return false;
                 const r = el.getBoundingClientRect();
-                if (r.width < 1 || r.height < 1) return false;
+                // For discovery, we only care that the element has dimensions
+                // (not display:none). It may be below the fold.
+                if (r.width < 1 && r.height < 1) {
+                    const cs = getComputedStyle(el);
+                    return cs.display !== 'none' && cs.visibility !== 'hidden';
+                }
                 const cs = getComputedStyle(el);
                 return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
             };
@@ -2270,6 +2275,12 @@ async def _discover_contact_url_on_site(page, input_url: str, company_name: str 
             pause_s = min(CONTACT_DISCOVERY_STEP_PAUSE_MS / 1000.0, _contact_discovery_time_left(deadline))
             if pause_s > 0:
                 await asyncio.sleep(pause_s)
+            # Scroll down to reveal forms below the fold
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
             if await _has_form_signal_for_discovery(page):
                 return (page.url or candidate), f"common_path:{path}", True
         except Exception:
@@ -2357,6 +2368,12 @@ async def _discover_contact_url_on_site(page, input_url: str, company_name: str 
             pause_s = min(CONTACT_DISCOVERY_STEP_PAUSE_MS / 1000.0, _contact_discovery_time_left(deadline))
             if pause_s > 0:
                 await asyncio.sleep(pause_s)
+            # Scroll to reveal forms below the fold
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
             if await _has_form_signal_for_discovery(page):
                 hint = (text or _urlparse.urlparse(candidate).path or "link").strip()[:32]
                 return (page.url or candidate), f"link_scan:{hint}", True
