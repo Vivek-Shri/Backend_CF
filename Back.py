@@ -2341,7 +2341,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 				if existing_keys:
 					# We have duplicates! Let's get the detailed info for the 409 response
 					placeholders2 = ",".join(["%s"] * len(existing_keys))
-					cur.execute(f"SELECT c.url_key, c.company_name, c.campaign_id, cmp.name FROM campaign_contacts c JOIN campaigns cmp ON c.campaign_id = cmp.id WHERE c.url_key IN ({placeholders2}) AND c.campaign_id != %s", (*existing_keys, campaign_id))
+					cur.execute(f"SELECT c.url_key, c.company_name, c.campaign_id, cmp.name FROM campaign_contacts c JOIN campaigns cmp ON c.campaign_id = cmp.campaign_id WHERE c.url_key IN ({placeholders2}) AND c.campaign_id != %s", (*existing_keys, campaign_id))
 					
 					duplicate_details = []
 					for row in cur.fetchall():
