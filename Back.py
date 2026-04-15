@@ -2274,7 +2274,7 @@ def create_campaign_contact(request: Request, campaign_id: str, payload: Campaig
 			cur.execute("""
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at, user_id
+					location, industry, notes, created_at, updated_at
 				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				doc["contact_id"], doc["campaign_id"], doc["company_name"], doc["contact_url"],
@@ -2333,8 +2333,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 			_safe_trim(item.get("industry")),
 			_safe_trim(item.get("notes")),
 			now,
-			now,
-			user_id
+			now
 		))
 	
 	print(f"[Bulk] Campaign {campaign_id}: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2379,7 +2378,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at, user_id
+					location, industry, notes, created_at, updated_at
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
 			""", docs_to_insert, page_size=1000)
@@ -2654,8 +2653,7 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 			url_key,
 			"", "", "", # location, industry, notes
 			now,
-			now,
-			user_id or None
+			now or None
 		))
 	
 	print(f"[Bulk] Global: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2669,7 +2667,7 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at, user_id
+					location, industry, notes, created_at, updated_at
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
 			""", docs_to_insert, page_size=1000)
