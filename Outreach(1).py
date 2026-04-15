@@ -2551,7 +2551,7 @@ async def find_form_target(page, url):
                 if not await el.is_visible():
                     continue
                 href = (await el.get_attribute("href") or "").lower()
-                if any(x in href for x in ["facebook","twitter","linkedin","mailto:","#"]):
+                if any(x in href for x in ["facebook","twitter","linkedin","mailto:"]) or href == "#":
                     continue
                 print(f"   [FormFinder] S5: Clicking contact link...")
                 await el.click()
@@ -3888,7 +3888,11 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 if (isCountryCodeLike) {{ RF(el,'{MY_COUNTRY_DIAL_CODE}'); return; }}
                 if (h.includes('country') && !isCountryCodeLike) {{ RF(el,'India'); return; }}
                 if (h.includes('zip')||h.includes('postal')||h.includes('pin')) {{ RF(el,'{MY_PIN_CODE}'); return; }}
-                if (el.tagName==='TEXTAREA'||h.includes('message')||h.includes('comment')) {{ RF(el,`{pitch_e}`); return; }}
+                if (h.includes('city')||h.includes('town')) {{ RF(el,'Mumbai'); return; }}
+                if (h.includes('state')||h.includes('province')||h.includes('region')) {{ RF(el,'Maharashtra'); return; }}
+                if (h.includes('address')||h.includes('street')||h.includes('po box')||h.includes('p.o. box')||h.includes('pobox')) {{ RF(el,'123 Business Park'); return; }}
+                if (h.includes('title')||h.includes('designation')||h.includes('job title')||h.includes('position')) {{ RF(el,'Director'); return; }}
+                if (el.tagName==='TEXTAREA'||h.includes('message')||h.includes('comment')||h.includes('question')||h.includes('inquiry')||h.includes('enquiry')||h.includes('detail')||h.includes('description')||h.includes('how can we help')) {{ RF(el,`{pitch_e}`); return; }}
                 if (el.type==='text') {{ RF(el,'{MY_FULL_NAME}'); return; }}
             }});
             return n;
@@ -7976,8 +7980,16 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             await context.close()
             await browser.close()
             return
-
-        if (not cap_solved or 'timeout' in captcha_status or 'no-sitekey' in captcha_status or 'cloudflare-challenge-page' in captcha_status):
+        # ── Captcha detected but NOT solved → skip submit ──
+        # IMPORTANT: only gate when a real captcha was detected.
+        # detect_and_solve_captcha returns (False, "none") when NO captcha exists.
+        captcha_was_detected = captcha_status not in ("none", "None", "")
+        if captcha_was_detected and (
+            not cap_solved
+            or 'timeout' in captcha_status
+            or 'no-sitekey' in captcha_status
+            or 'cloudflare-challenge-page' in captcha_status
+        ):
             _nopecha_log(
                 f"[Captcha] submit skipped company={company_name[:40]} reason={captcha_status}"
             )
