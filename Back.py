@@ -1321,6 +1321,9 @@ def _map_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 		"bandwidthKb": float(payload.get("bandwidth_kb") or 0),
 		"domain": str(payload.get("domain") or ""),
 		"fieldsFilledData": payload.get("fields_filled_data") or {},
+		"strategy": str(payload.get("strategy") or "N/A"),
+		"discoveryMethod": str(payload.get("discovery_method") or "direct"),
+		"detectedFormUrl": str(payload.get("detected_form_url") or ""),
 	}
 
 

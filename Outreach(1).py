@@ -1112,7 +1112,8 @@ def _build_row(company_name, url, submitted, assurance,
 
 def _emit_result(company_name, url, submitted, assurance, captcha_status,
                  proxy_label, bw_kb, tok_cols=None, filled_fields=None,
-                 sub_status="", confirmation_msg="", message_sent=""):
+                 sub_status="", confirmation_msg="", message_sent="",
+                 strategy="", discovery_method="", detected_form_url=""):
     """Print a [RESULT] JSON line to stdout for the dashboard to capture."""
     if tok_cols and len(tok_cols) == 7:
         tc = tok_cols
@@ -1170,6 +1171,9 @@ def _emit_result(company_name, url, submitted, assurance, captcha_status,
         "confirmation_msg": str((confirmation_msg or assurance or ""))[:300],
         "message_sent": str(message_sent)[:500] if message_sent else "-",
         "step_index": _CURRENT_STEP_INDEX,
+        "strategy": str(strategy or "N/A"),
+        "discovery_method": str(discovery_method or "direct"),
+        "detected_form_url": str(detected_form_url or url),
     }
     # Include structured field data for the frontend's "Detailed Form Data" grid
     if isinstance(filled_fields, dict) and filled_fields:
@@ -2060,7 +2064,7 @@ CONTACT_DISCOVERY_MAX_SECONDS = max(6, _env_int("CONTACT_DISCOVERY_MAX_SECONDS",
 CONTACT_DISCOVERY_NAV_TIMEOUT_MS = max(2000, _env_int("CONTACT_DISCOVERY_NAV_TIMEOUT_MS", 9000))
 CONTACT_DISCOVERY_MAX_PATH_TRIES = max(2, min(16, _env_int("CONTACT_DISCOVERY_MAX_PATH_TRIES", 8)))
 CONTACT_DISCOVERY_MAX_LINK_TRIES = max(1, min(10, _env_int("CONTACT_DISCOVERY_MAX_LINK_TRIES", 4)))
-CONTACT_DISCOVERY_STEP_PAUSE_MS = max(0, min(2000, _env_int("CONTACT_DISCOVERY_STEP_PAUSE_MS", 800)))
+CONTACT_DISCOVERY_STEP_PAUSE_MS = max(0, min(1200, _env_int("CONTACT_DISCOVERY_STEP_PAUSE_MS", 350)))
 CONTACT_DISCOVERY_MIN_FIELDS = max(2, min(8, _env_int("CONTACT_DISCOVERY_MIN_FIELDS", 2)))
 
 
@@ -2147,12 +2151,7 @@ async def _has_form_signal_for_discovery(page) -> bool:
             const isVisible = (el) => {
                 if (!el) return false;
                 const r = el.getBoundingClientRect();
-                // For discovery, we only care that the element has dimensions
-                // (not display:none). It may be below the fold.
-                if (r.width < 1 && r.height < 1) {
-                    const cs = getComputedStyle(el);
-                    return cs.display !== 'none' && cs.visibility !== 'hidden';
-                }
+                if (r.width < 1 || r.height < 1) return false;
                 const cs = getComputedStyle(el);
                 return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
             };
@@ -2182,10 +2181,11 @@ async def _has_form_signal_for_discovery(page) -> bool:
 
             const hasEmail = controls.some(el => String(el.type || '').toLowerCase() === 'email');
             const hasTextarea = controls.some(el => String(el.tagName || '').toLowerCase() === 'textarea');
-            const hasForm = !!document.querySelector('form');
+            const hasForm = !!document.querySelector('form') || !!document.querySelector('[class*="form"]');
 
             const total = controls.length;
-            const strongSignal = (contactLike >= 2) || hasTextarea || (hasEmail);
+            const isSelectOnly = total > 0 && controls.every(el => el.tagName === 'SELECT');
+            const strongSignal = (contactLike >= 2) || hasTextarea || hasEmail || (hasForm && total >= 2);
 
             return {
                 total,
@@ -2193,7 +2193,7 @@ async def _has_form_signal_for_discovery(page) -> bool:
                 hasTextarea,
                 hasEmail,
                 hasForm,
-                signal: (total >= 2) && (strongSignal || total >= minFields),
+                signal: (total >= 1 && (strongSignal || total >= minFields || isSelectOnly)),
             };
         }""", {"minFields": min_fields})
 
@@ -2275,12 +2275,6 @@ async def _discover_contact_url_on_site(page, input_url: str, company_name: str 
             pause_s = min(CONTACT_DISCOVERY_STEP_PAUSE_MS / 1000.0, _contact_discovery_time_left(deadline))
             if pause_s > 0:
                 await asyncio.sleep(pause_s)
-            # Scroll down to reveal forms below the fold
-            try:
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
             if await _has_form_signal_for_discovery(page):
                 return (page.url or candidate), f"common_path:{path}", True
         except Exception:
@@ -2368,12 +2362,6 @@ async def _discover_contact_url_on_site(page, input_url: str, company_name: str 
             pause_s = min(CONTACT_DISCOVERY_STEP_PAUSE_MS / 1000.0, _contact_discovery_time_left(deadline))
             if pause_s > 0:
                 await asyncio.sleep(pause_s)
-            # Scroll to reveal forms below the fold
-            try:
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
             if await _has_form_signal_for_discovery(page):
                 hint = (text or _urlparse.urlparse(candidate).path or "link").strip()[:32]
                 return (page.url or candidate), f"link_scan:{hint}", True
@@ -2455,6 +2443,12 @@ async def _count_form_fields(frame_or_page) -> int:
                 }
                 return true;
             }).length;
+            if (res === 0) {
+                // Relaxed check: if no fields found, check for any inputs at all that are not hidden
+                // on some sites forms use custom components or inputs without standard types
+                return document.querySelectorAll('input:not([type="hidden"]), textarea, select').length;
+            }
+            return res;
         }""")
     except Exception:
         return 0
@@ -2554,10 +2548,11 @@ async def find_form_target(page, url):
     # Strategy 5: click contact links
     print(f"   [FormFinder] S5: Contact links...")
     contact_link_selectors = [
-        "a[href*='contact' i]","a[href*='reach' i]","a[href*='touch' i]",
+        "a[href*='contact' i]","a[href*='reach' i]","a[href*='touch' i]","a[href*='connect' i]",
         "a:has-text('Contact Us')","a:has-text('Contact')",
         "a:has-text('Get in Touch')","a:has-text('Write to Us')",
-        "nav a[href*='contact' i]","footer a[href*='contact' i]",
+        "a:has-text('Connect')","a:has-text('Talk to a')",
+        "nav a[href*='contact' i]","footer a[href*='contact' i]","nav a[href*='connect' i]",
     ]
     for sel in contact_link_selectors:
         try:
@@ -2568,7 +2563,7 @@ async def find_form_target(page, url):
                 if not await el.is_visible():
                     continue
                 href = (await el.get_attribute("href") or "").lower()
-                if any(x in href for x in ["facebook","twitter","linkedin","mailto:"]) or href == "#":
+                if any(x in href for x in ["facebook","twitter","linkedin","mailto:","#"]):
                     continue
                 print(f"   [FormFinder] S5: Clicking contact link...")
                 await el.click()
@@ -3905,11 +3900,7 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 if (isCountryCodeLike) {{ RF(el,'{MY_COUNTRY_DIAL_CODE}'); return; }}
                 if (h.includes('country') && !isCountryCodeLike) {{ RF(el,'India'); return; }}
                 if (h.includes('zip')||h.includes('postal')||h.includes('pin')) {{ RF(el,'{MY_PIN_CODE}'); return; }}
-                if (h.includes('city')||h.includes('town')) {{ RF(el,'Mumbai'); return; }}
-                if (h.includes('state')||h.includes('province')||h.includes('region')) {{ RF(el,'Maharashtra'); return; }}
-                if (h.includes('address')||h.includes('street')||h.includes('po box')||h.includes('p.o. box')||h.includes('pobox')) {{ RF(el,'123 Business Park'); return; }}
-                if (h.includes('title')||h.includes('designation')||h.includes('job title')||h.includes('position')) {{ RF(el,'Director'); return; }}
-                if (el.tagName==='TEXTAREA'||h.includes('message')||h.includes('comment')||h.includes('question')||h.includes('inquiry')||h.includes('enquiry')||h.includes('detail')||h.includes('description')||h.includes('how can we help')) {{ RF(el,`{pitch_e}`); return; }}
+                if (el.tagName==='TEXTAREA'||h.includes('message')||h.includes('comment')) {{ RF(el,`{pitch_e}`); return; }}
                 if (el.type==='text') {{ RF(el,'{MY_FULL_NAME}'); return; }}
             }});
             return n;
@@ -7639,6 +7630,11 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
     if not using_proxy:
         proxy_label = "DIRECT(env)"
     original_proxy_label = proxy_label
+    
+    # Metadata for reporting
+    effective_discovery_method = "direct"
+    effective_strategy = "N/A"
+    effective_form_url = url
 
     async def _new_context_page(use_proxy: bool):
         ctx_kwargs = {
@@ -7763,6 +7759,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                     ),
                     timeout=discover_timeout,
                 )
+                effective_discovery_method = discover_method
                 discovered_url = _normalize_website_url(discovered_url) or url
                 if discovered_has_form:
                     if discovered_url != url:
@@ -7784,6 +7781,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 print(f"   [{company_name[:20]}] [ContactFinder] skipped: {type(e).__name__}")
 
         target, strategy = await find_form_target(page, url)
+        effective_strategy = strategy
+        effective_form_url = str(page.url or url)
         print(f"   [{company_name[:20]}] Form found via: {strategy}")
 
         # Keep the sheet's Contact Page URL aligned with the effective page
@@ -7868,7 +7867,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                     _lead_tokens(), message_sent=pitch, subject_text=subject,
                     time_taken=_lead_time_taken(),
                 ))
-                _emit_result(company_name, url, "No", no_form_reason, "N/A", proxy_label, str(bw_kb), _lead_tokens(), message_sent=pitch)
+                _emit_result(company_name, url, "No", no_form_reason, "N/A", proxy_label, str(bw_kb), _lead_tokens(), message_sent=pitch, 
+                             strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
                 await context.close()
                 await browser.close()
                 return
@@ -7895,7 +7895,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                         subject_text=subject,
                         time_taken=_lead_time_taken(),
                     ))
-                    _emit_result(company_name, url, "Yes" if ok else "No", "Skyvern submitted" if ok else "Skyvern failed", "N/A", proxy_label, str(bw_kb), _lead_tokens())
+                    _emit_result(company_name, url, "Yes" if ok else "No", "Skyvern submitted" if ok else "Skyvern failed", "N/A", proxy_label, str(bw_kb), _lead_tokens(),
+                                 strategy="skyvern", discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
                     return
 
             bw_kb = round(bw["bytes"] / 1024, 1)
@@ -7906,7 +7907,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", "Filled 0 fields", "N/A", proxy_label, str(bw_kb), _lead_tokens())
+            _emit_result(company_name, url, "No", "Filled 0 fields", "N/A", proxy_label, str(bw_kb), _lead_tokens(),
+                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
             await context.close()
             await browser.close()
             return
@@ -7993,20 +7995,13 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 filled_fields=form_data, message_sent=pitch, subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", f"Captcha error: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch)
+            _emit_result(company_name, url, "No", f"Captcha error: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch,
+                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
             await context.close()
             await browser.close()
             return
-        # ── Captcha detected but NOT solved → skip submit ──
-        # IMPORTANT: only gate when a real captcha was detected.
-        # detect_and_solve_captcha returns (False, "none") when NO captcha exists.
-        captcha_was_detected = captcha_status not in ("none", "None", "")
-        if captcha_was_detected and (
-            not cap_solved
-            or 'timeout' in captcha_status
-            or 'no-sitekey' in captcha_status
-            or 'cloudflare-challenge-page' in captcha_status
-        ):
+
+        if (not cap_solved or 'timeout' in captcha_status or 'no-sitekey' in captcha_status or 'cloudflare-challenge-page' in captcha_status):
             _nopecha_log(
                 f"[Captcha] submit skipped company={company_name[:40]} reason={captcha_status}"
             )
@@ -8019,7 +8014,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 filled_fields=form_data, message_sent=pitch, subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", f"Captcha not solved: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch)
+            _emit_result(company_name, url, "No", f"Captcha not solved: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch,
+                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
             await context.close()
             await browser.close()
             return
@@ -8046,7 +8042,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 filled_fields=form_data, message_sent=pitch, subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", submit_fail_reason, captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch)
+            _emit_result(company_name, url, "No", submit_fail_reason, captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch,
+                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
             await context.close()
             await browser.close()
             return
@@ -8413,7 +8410,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             subject_text=subject,
             time_taken=_lead_time_taken(),
         ))
-        _emit_result(company_name, url, status, assurance, captcha_status, proxy_label, str(bw_kb), tok_cols, filled_fields=form_data, sub_status=status, confirmation_msg=assurance, message_sent=pitch)
+        _emit_result(company_name, url, status, assurance, captcha_status, proxy_label, str(bw_kb), tok_cols, filled_fields=form_data, sub_status=status, confirmation_msg=assurance, message_sent=pitch,
+                     strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
 
         token_tracker.print_summary()
 
