@@ -190,6 +190,29 @@ def _init_db() -> None:
 					END IF;
 				END $$;
 			""")
+
+			# Migration: add url_key column to campaign_contacts if missing
+			cur.execute("""
+				DO  BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaign_contacts' AND column_name = 'url_key'
+					) THEN
+						ALTER TABLE campaign_contacts ADD COLUMN url_key TEXT DEFAULT '';
+						UPDATE campaign_contacts SET url_key = md5(contact_url) WHERE url_key = '';
+					END IF;
+				END ;
+			""")
+			# Migration: add unique constraint for campaign_id and url_key if missing
+			cur.execute("""
+				DO  BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM pg_constraint WHERE conname = 'campaign_contacts_campaign_id_url_key_key'
+					) THEN
+						ALTER TABLE campaign_contacts ADD CONSTRAINT campaign_contacts_campaign_id_url_key_key UNIQUE (campaign_id, url_key);
+					END IF;
+				END ;
+			""")
 			# Migration: add schedule_day column to campaigns if missing
 			cur.execute("""
 				DO $$ BEGIN
@@ -248,9 +271,7 @@ def _init_db() -> None:
 					status TEXT,
 					submitted TEXT,
 					confirmation_msg TEXT,
-					created_at TEXT,
-					fields_filled_data TEXT DEFAULT '',
-					filled_data JSONB DEFAULT '{}'::jsonb
+					created_at TEXT
 				)
 			""")
 
@@ -279,8 +300,6 @@ def _init_db() -> None:
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS error_detail TEXT DEFAULT ''")
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS bandwidth_kb NUMERIC(10,2) DEFAULT 0")
 			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT ''")
-			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS fields_filled_data TEXT DEFAULT ''")
-			cur.execute("ALTER TABLE outreach_results ADD COLUMN IF NOT EXISTS filled_data JSONB DEFAULT '{}'::jsonb")
 
 			# Global submitted contacts table for cross-campaign deduplication
 			cur.execute("""
@@ -618,8 +637,8 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 					status, submitted, confirmation_msg,
 					form_found, captcha_present, captcha_type, captcha_result,
 					http_status_code, error_detail, bandwidth_kb, domain,
-					created_at, fields_filled_data, filled_data
-				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					created_at, fields_filled_data
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				campaign_id,
 				run_id,
@@ -638,8 +657,7 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 				parsed_result.get("bandwidthKb", 0),
 				parsed_result.get("domain", ""),
 				_utc_now_iso(),
-				parsed_result.get("fieldsFilled", ""),
-				psycopg2.extras.Json(parsed_result.get("fieldsFilledData") or {})
+				parsed_result.get("fieldsFilled", "")
 			))
 
 			is_submitted = str(parsed_result.get("submitted") or "").strip().lower() == "yes"
@@ -1063,28 +1081,6 @@ def _safe_trim(value: Any) -> str:
 	return str(value or "").strip()
 
 
-def _normalize_filled_data(value: Any) -> dict[str, str]:
-	if not isinstance(value, dict):
-		return {}
-
-	clean: dict[str, str] = {}
-	for raw_key, raw_value in value.items():
-		key = _safe_trim(raw_key)
-		if not key or raw_value is None:
-			continue
-		if isinstance(raw_value, (dict, list, tuple, set)):
-			try:
-				text = json.dumps(raw_value, ensure_ascii=False)
-			except Exception:
-				text = str(raw_value)
-		else:
-			text = str(raw_value)
-		text = text.strip()
-		if text:
-			clean[key[:120]] = text[:2000]
-	return clean
-
-
 def _normalize_campaign_status(raw_status: str) -> str:
 	value = _safe_trim(raw_status).lower()
 	allowed = {"draft", "active", "paused", "archived"}
@@ -1306,11 +1302,6 @@ def _map_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 	captcha_status = str(payload.get("captcha_status") or "n/a")
 	submission_status = str(payload.get("submission_status") or "")
 	assurance = str(payload.get("submission_assurance") or "")
-	fields_filled_data = _normalize_filled_data(
-		payload.get("fields_filled_data")
-		or payload.get("filled_data")
-		or payload.get("fieldsFilledData")
-	)
 
 	# Properly parse "Yes"/"No" strings from the Outreach script
 	captcha_present_raw = str(payload.get("captcha_present") or "No").strip().lower()
@@ -1328,7 +1319,7 @@ def _map_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 	# Primary: fields were filled and no "not found" signal
 	form_found = (
-		(fields_filled not in ("-", "- none", "") or bool(payload.get("fields_filled_data")))
+		fields_filled not in ("-", "- none", "")
 		and not has_no_form_signal
 	)
 
@@ -1363,7 +1354,6 @@ def _map_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 		"errorDetail": str(payload.get("error_detail") or ""),
 		"bandwidthKb": float(payload.get("bandwidth_kb") or 0),
 		"domain": str(payload.get("domain") or ""),
-		"fieldsFilledData": fields_filled_data,
 	}
 
 
@@ -1644,8 +1634,6 @@ def _build_persona_env(persona: dict[str, Any] | None) -> dict[str, str]:
 	if full_name:
 		env["MY_FULL_NAME"] = full_name
 
-	return env
-
 
 def _advance_contact_step(campaign_id: str, contact_url: str, steps: list) -> None:
 	"""After successful form submission, advance the contact to the next campaign step.
@@ -1708,6 +1696,8 @@ def _advance_contact_step(campaign_id: str, contact_url: str, steps: list) -> No
 			pass
 	finally:
 		_db_put_conn(conn)
+
+
 
 
 def _append_log(line: str, run_id: str) -> None:
@@ -1799,10 +1789,7 @@ def _refresh_process_state() -> None:
 
 	for run_id, state in completed_runs:
 		exit_code = state["exit_code"]
-		if state.get("status") == "stopping":
-			status = "stopped"
-		else:
-			status = "completed" if int(exit_code) == 0 else "failed"
+		status = "completed" if int(exit_code) == 0 else "failed"
 		_db_update_run_state(
 			run_id,
 			status=status,
@@ -2274,7 +2261,7 @@ def create_campaign_contact(request: Request, campaign_id: str, payload: Campaig
 			cur.execute("""
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at
+					location, industry, notes, created_at, updated_at, user_id
 				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			""", (
 				doc["contact_id"], doc["campaign_id"], doc["company_name"], doc["contact_url"],
@@ -2333,7 +2320,8 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 			_safe_trim(item.get("industry")),
 			_safe_trim(item.get("notes")),
 			now,
-			now
+			now,
+			user_id
 		))
 	
 	print(f"[Bulk] Campaign {campaign_id}: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2378,7 +2366,7 @@ def create_bulk_campaign_contacts(request: Request, campaign_id: str, payload: B
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at
+					location, industry, notes, created_at, updated_at, user_id
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
 			""", docs_to_insert, page_size=1000)
@@ -2653,7 +2641,8 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 			url_key,
 			"", "", "", # location, industry, notes
 			now,
-			now or None
+			now,
+			user_id or None
 		))
 	
 	print(f"[Bulk] Global: received={len(payload.contacts)} valid={len(docs_to_insert)} no_url={skipped_no_url} invalid={skipped_invalid} dup={skipped_dup}")
@@ -2667,7 +2656,7 @@ def create_bulk_contacts(request: Request, payload: BulkContactsCreateRequest = 
 			psycopg2.extras.execute_values(cur, """
 				INSERT INTO campaign_contacts (
 					contact_id, campaign_id, company_name, contact_url, domain, url_key,
-					location, industry, notes, created_at, updated_at
+					location, industry, notes, created_at, updated_at, user_id
 				) VALUES %s
 				ON CONFLICT (campaign_id, url_key) DO NOTHING
 			""", docs_to_insert, page_size=1000)
@@ -3016,13 +3005,26 @@ def outreach_status(request: Request) -> dict:
 		latest = _db_get_latest_run(user_id, is_admin)
 	if latest is not None:
 		db_status = latest.get("status") or "unknown"
+		# Auto-correct: if DB says "running" but process is NOT in _active_runs,
+		# the run is orphaned (container restart, process crashed, etc.)
+		if db_status == "running":
+			exit_code = latest.get("exit_code")
+			finished_at = latest.get("finished_at")
+			if exit_code is not None:
+				db_status = "completed" if int(exit_code) == 0 else "failed"
+			elif finished_at:
+				db_status = "completed"
+			else:
+				db_status = "stopped"
+			# Persist the correction so it doesn't happen again
+			_db_update_run_state(
+				latest.get("run_id"),
+				status=db_status,
+				finished_at=finished_at or _utc_now_iso(),
+			)
 		total_leads = int(latest.get("total_leads") or 0)
 		processed_leads = int(latest.get("processed_leads") or 0)
-		db_running = (
-			db_status in {"queued", "running", "stopping"}
-			and latest.get("finished_at") is None
-			and latest.get("exit_code") is None
-		)
+		progress = int(round((processed_leads / total_leads) * 100)) if total_leads > 0 else 0
 		
 		# Fetch results so the frontend stats don't drop to 0
 		db_results = []
@@ -3034,7 +3036,7 @@ def outreach_status(request: Request) -> dict:
 					cur.execute("""
 						SELECT company_name, contact_url, status, submitted, confirmation_msg,
 						       captcha_present, captcha_type, captcha_result, form_found,
-						       bandwidth_kb, error_detail, fields_filled_data, filled_data
+						       bandwidth_kb, error_detail, fields_filled_data
 						FROM outreach_results WHERE run_id = %s
 					""", (run_id_val,))
 					for row in cur.fetchall():
@@ -3058,7 +3060,6 @@ def outreach_status(request: Request) -> dict:
 							"captchaPresent": captcha_present_val,
 							"formFound": bool(row["form_found"]),
 							"fieldsFilled": row["fields_filled_data"] or "",
-							"fieldsFilledData": _normalize_filled_data(row["filled_data"]),
 							"bandwidthKb": float(row["bandwidth_kb"] or 0),
 							"errorDetail": row["error_detail"] or "",
 						})
@@ -3067,11 +3068,8 @@ def outreach_status(request: Request) -> dict:
 			finally:
 				_db_put_conn(conn)
 
-		processed_leads = max(processed_leads, len(db_results))
-		progress = int(round((processed_leads / total_leads) * 100)) if total_leads > 0 else 0
-
 		return {
-			"running": db_running,
+			"running": False,
 			"run_id": run_id_val,
 			"campaign_id": latest.get("campaign_id"),
 			"campaign_title": latest.get("campaign_title"),
@@ -3204,20 +3202,9 @@ async def stop_outreach(
 		# Use the reliable `process` to send the signal, if it is still alive
 		if proc.poll() is None:
 			try:
-				import platform, subprocess
-				if platform.system() == 'Windows':
-					subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
-				else:
-					import psutil
-					parent = psutil.Process(proc.pid)
-					for child in parent.children(recursive=True):
-						child.kill()
-					parent.kill()
+				proc.kill()
 			except Exception:
-				try:
-					proc.kill()
-				except Exception:
-					pass
+				pass
 		state["status"] = "stopping"
 		state["logs"].append(f"[{_utc_now_iso()}] Stop requested")
 		_db_update_run_state(
