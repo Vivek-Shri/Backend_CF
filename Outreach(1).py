@@ -1653,8 +1653,21 @@ async def detect_and_solve_captcha(page, iframe=None):
     has_recaptcha = bool(
         re.search(r'class=["\'][^"\']*g-recaptcha', html, re.I) or
         re.search(r'recaptcha/api2/anchor|recaptcha/enterprise/anchor|recaptcha/api\.js', html, re.I) or
-        re.search(r'grecaptcha\.(render|execute|ready)\s*\(', html, re.I)
+        re.search(r'grecaptcha\.(render|execute|ready)\s*\(', html, re.I) or
+        re.search(r'www\.google\.com/recaptcha', html, re.I) or
+        re.search(r'g-recaptcha-response', html, re.I)
     )
+
+    # Selector-based fallback detection for reCAPTCHA v2
+    if not has_recaptcha:
+        try:
+            for src in [page] + page.frames:
+                if await src.locator('iframe[src*="google.com/recaptcha"]').count() > 0:
+                    has_recaptcha = True
+                    break
+        except Exception:
+            pass
+
     has_turnstile = bool(
         re.search(r'cf-turnstile|challenges\.cloudflare\.com/turnstile|turnstile\.render\s*\(', html, re.I)
     )
@@ -3257,8 +3270,17 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
         fb = await _js_fallback_fill(page, company_name, pitch, subject)
         return fb, {}
 
-    async def _execute_actions(actions_list, selector_guard_local: dict, phase_label="pass"):
+    async def _execute_actions(actions_list, selector_guard_local: dict, phase_label="pass", elements_meta=None):
         nonlocal total_filled, filled_values
+        elements_meta = elements_meta or []
+        
+        # Build map for label lookup
+        label_map = {}
+        for e in elements_meta:
+            sel = e.get("sel")
+            lbl = e.get("label") or e.get("name") or e.get("id") or ""
+            if sel and lbl:
+                label_map[sel] = lbl
 
         applied = 0
         for act in actions_list:
@@ -3387,7 +3409,8 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
                             pass
                     if filled:
                         print(f"   [{company_name[:20]}] [{phase_label}] + fill {selector[:35]} = {target_value[:25]}")
-                        filled_values[selector] = target_value
+                        key_name = label_map.get(selector) or selector
+                        filled_values[key_name] = target_value
                         total_filled += 1
                         applied += 1
 
@@ -3639,7 +3662,7 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
         return applied
 
     # Execute first GPT action plan
-    await _execute_actions(actions, selector_guard, phase_label="pass1")
+    await _execute_actions(actions, selector_guard, phase_label="pass1", elements_meta=elements)
 
     # Detect still-empty fields and run a second GPT completion pass.
     missing_elements = []
@@ -3761,7 +3784,7 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
         try:
             retry_actions = await _request_actions_with_recovery(retry_prompt, "form_fill_retry", retry_guard)
             if retry_actions:
-                await _execute_actions(retry_actions, retry_guard, phase_label="pass2")
+                await _execute_actions(retry_actions, retry_guard, phase_label="pass2", elements_meta=missing_elements)
         except Exception as e:
             print(f"   [{company_name[:20]}] [GPT] pass2 skipped: {str(e)[:80]}")
 
@@ -7567,6 +7590,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 )
 
 
+    form_data = {}
     captcha_status = "None"
     bw = {
         "bytes": 0,
@@ -7762,9 +7786,16 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         if strategy == "fallback-main":
             print(f"   [{company_name[:20]}] Form finder returned fallback - trying GPT fill anyway...")
 
-        filled, form_data = await gpt_fill_form(page, target, company_name, pitch, subject, worker_index) 
-        if not isinstance(form_data, dict):
-            form_data = {}
+        filled, gpt_data = await gpt_fill_form(page, target, company_name, pitch, subject, worker_index) 
+        if isinstance(gpt_data, dict):
+            for k, v in gpt_data.items():
+                form_data[k] = v
+        else:
+            gpt_data = {}
+        
+        # Ensure we don't proceed if gpt_fill_form failed completely in a non-recoverable way
+        if filled == 0 and not "fallback" in strategy:
+             print(f"   [{company_name[:20]}] GPT filled 0 fields - continuing with heuristics")
 
         # Some sites keep required dropdowns empty despite successful text fills.
         dropdown_fixed = await ensure_required_dropdowns(page, target, company_name)
@@ -7946,12 +7977,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             await browser.close()
             return
 
-        # â”€â”€ Captcha timeout/failed â†’ skip submit, mark No â”€â”€â”€â”€
-        if (
-            "timeout" in captcha_status
-            or "no-sitekey" in captcha_status
-            or "cloudflare-challenge-page" in captcha_status
-        ):
+        if (not cap_solved or 'timeout' in captcha_status or 'no-sitekey' in captcha_status or 'cloudflare-challenge-page' in captcha_status):
             _nopecha_log(
                 f"[Captcha] submit skipped company={company_name[:40]} reason={captcha_status}"
             )
