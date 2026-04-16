@@ -61,7 +61,6 @@ def _resolve_database_url() -> str:
 	return DEFAULT_DATABASE_URL
 
 DATABASE_URL = _resolve_database_url()
-
 _db_pool: pool.SimpleConnectionPool | None = None
 _db_available = False
 _db_init_error: str | None = None
@@ -101,7 +100,80 @@ def _init_db() -> None:
 					created_at TEXT NOT NULL
 				)
 			""")
-			# Campaigns table
+			# Migration: add fields_filled_data to campaign_contacts if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaign_contacts' AND column_name = 'fields_filled_data'
+					) THEN
+						ALTER TABLE campaign_contacts ADD COLUMN fields_filled_data TEXT DEFAULT '';
+					END IF;
+				END $$;
+			""")
+			# Migration: add fields_filled_data to submission_logs if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'submission_logs' AND column_name = 'fields_filled_data'
+					) THEN
+						ALTER TABLE submission_logs ADD COLUMN fields_filled_data TEXT DEFAULT '';
+					END IF;
+				END $$;
+			""")
+			# Runs table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS outreach_runs (
+					run_id TEXT PRIMARY KEY,
+					status TEXT NOT NULL,
+					pid INTEGER,
+					csv_path TEXT,
+					started_at TEXT,
+					finished_at TEXT,
+					campaign_id TEXT,
+					campaign_title TEXT,
+					total_leads INTEGER DEFAULT 0,
+					processed_leads INTEGER DEFAULT 0,
+					duplicates_skipped INTEGER DEFAULT 0,
+					resume_skipped_leads INTEGER DEFAULT 0,
+					social_skipped_leads INTEGER DEFAULT 0,
+					resumed_from_run_id TEXT,
+					exit_code INTEGER
+				)
+			""")
+			# Logs table
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS outreach_logs (
+					id SERIAL PRIMARY KEY,
+					run_id TEXT NOT NULL,
+					line TEXT NOT NULL,
+					created_at TEXT NOT NULL
+				)
+			""")
+			# Migration: add fields_filled_data to campaign_contacts if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'campaign_contacts' AND column_name = 'fields_filled_data'
+					) THEN
+						ALTER TABLE campaign_contacts ADD COLUMN fields_filled_data TEXT DEFAULT '';
+					END IF;
+				END $$;
+			""")
+
+			# Migration: add fields_filled_data to submission_logs if missing
+			cur.execute("""
+				DO $$ BEGIN
+					IF NOT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'submission_logs' AND column_name = 'fields_filled_data'
+					) THEN
+						ALTER TABLE submission_logs ADD COLUMN fields_filled_data TEXT DEFAULT '';
+					END IF;
+				END $$;
+			""")
 			cur.execute("""
 				CREATE TABLE IF NOT EXISTS campaigns (
 					campaign_id TEXT PRIMARY KEY,
@@ -699,7 +771,9 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 			contact_url = str(parsed_result.get("contactUrl") or "").strip()
 			url_key = _normalize_url_key(contact_url)
 
-			# Attempt to update campaign_contacts with new columns
+
+			# Attempt to update campaign_contacts with new columns, including fields_filled_data
+			fields_filled_data = parsed_result.get("fieldsFilled", "")
 			if campaign_id and url_key:
 				cur.execute("""
 					UPDATE campaign_contacts
@@ -708,7 +782,8 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 						form_present = %s,
 						captcha_present = %s,
 						proxy_bandwidth_mb = %s,
-						submitted_at = %s
+						submitted_at = %s,
+						fields_filled_data = %s
 					WHERE campaign_id = %s AND url_key = %s
 					RETURNING contact_id
 				""", (
@@ -718,6 +793,7 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 					captcha_present,
 					float(parsed_result.get("bandwidthKb", 0)) / 1024.0,
 					_utc_now_iso(),
+					fields_filled_data,
 					campaign_id,
 					url_key
 				))
@@ -731,11 +807,11 @@ def _db_record_result(run_id: str | None, campaign_id: str | None, user_id: str 
 					master_c_id = cur.fetchone()[0]
 
 					raw_payload = parsed_result.get("_raw_payload", {})
-					
+
 					cur.execute("""
-						INSERT INTO submission_logs (contact_id, campaign_id, campaign_contact_id, status, detail_status, request_payload)
-						VALUES (%s, %s, %s, %s::attempt_status, %s::attempt_detail_status, %s)
-					""", (master_c_id, campaign_id, cc_id, attempt_status_val, detail_status, json.dumps(raw_payload)))
+						INSERT INTO submission_logs (contact_id, campaign_id, campaign_contact_id, status, detail_status, request_payload, fields_filled_data)
+						VALUES (%s, %s, %s, %s::attempt_status, %s::attempt_detail_status, %s, %s)
+					""", (master_c_id, campaign_id, cc_id, attempt_status_val, detail_status, json.dumps(raw_payload), fields_filled_data))
 
 					if is_submitted:
 						cur.execute("""
