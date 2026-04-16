@@ -90,7 +90,7 @@ try:
 except Exception as _step_err:
     print(f"[Steps] Warning: failed to parse CAMPAIGN_STEPS: {_step_err}")
 
-OPENAI_FORM_FILL_MODEL = str(os.environ.get("OPENAI_FORM_FILL_MODEL", "gpt-5-nano") or "gpt-5-nano").strip()
+OPENAI_FORM_FILL_MODEL = str(os.environ.get("OPENAI_FORM_FILL_MODEL", "gpt-4o-mini") or "gpt-4o-mini").strip()
 SPREADSHEET_ID     = os.environ.get("SPREADSHEET_ID", "1H5ZyBKwKfoXledQgEDk9LvO4KDXzH3plkeamgEXhrWs")
 CREDS_FILE         = str(os.environ.get("CREDS_FILE", "google_credentials.json") or "google_credentials.json").strip()
 NOPECHA_API_KEYS   = [
@@ -203,22 +203,23 @@ def _peek_stable_nopecha_credit_left() -> str:
         if _nopecha_run_credit_left is None:
             return ""
         return str(max(0, int(_nopecha_run_credit_left)))
-
-
+ 
+ 
 SHADOW_DOM_PIERCING_SCRIPT = """
-    const shadowScan = (root = document) => {
-        let found = Array.from(root.querySelectorAll('input, textarea, select'));
-        const all = root.querySelectorAll('*');
-        for (const el of all) {
-            if (el.shadowRoot) {
-                found = found.concat(shadowScan(el.shadowRoot));
+    const getAllElements = (root = document) => {
+        let elements = Array.from(root.querySelectorAll('*'));
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
+        let node;
+        while(node = walker.nextNode()) {
+            if (node.shadowRoot) {
+                elements = elements.concat(getAllElements(node.shadowRoot));
             }
         }
-        return found;
+        return elements;
     };
 """
-
-
+ 
+ 
 def _consume_nopecha_credit_for_row(captcha_status: str) -> tuple[str, str]:
     global _nopecha_run_credit_left
     row_used = _nopecha_solves_consumed(captcha_status) * NOPECHA_CREDIT_PER_SOLVE
@@ -287,10 +288,45 @@ MY_COUNTRY_DIAL_CODE = f"+{_MY_COUNTRY_DIAL_DIGITS or '1'}"
 MY_COMPANY       = os.environ.get("MY_COMPANY", "HyperStaff")
 MY_WEBSITE       = os.environ.get("MY_WEBSITE", "https://hyperstaff.co")
 MY_ADDRESS       = os.environ.get("MY_ADDRESS", "NEW DELHI, INDIA")
+MY_JOB_TITLE     = str(os.environ.get("MY_JOB_TITLE", "") or "").strip()
 MY_TITLE         = os.environ.get("MY_TITLE", "Virtual Assistant Support for {company_name} - {MY_COMPANY}")
 PARALLEL_COUNT = 10   # 10 workers, one per proxy
 USE_PROXY = str(os.environ.get("USE_PROXY", "1")).strip().lower() not in {"0", "false", "no", "off"}
 ENABLE_CONTACT_DISCOVERY = str(os.environ.get("ENABLE_CONTACT_DISCOVERY", "1")).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _derive_country_name() -> str:
+    explicit = str(os.environ.get("MY_COUNTRY_NAME", "") or "").strip()
+    if explicit:
+        return explicit
+
+    address_upper = str(MY_ADDRESS or "").upper()
+    address_map = [
+        ("UNITED ARAB EMIRATES", "United Arab Emirates"),
+        ("UAE", "United Arab Emirates"),
+        ("UNITED STATES", "United States"),
+        ("USA", "United States"),
+        ("CANADA", "Canada"),
+        ("UNITED KINGDOM", "United Kingdom"),
+        ("UK", "United Kingdom"),
+        ("AUSTRALIA", "Australia"),
+        ("INDIA", "India"),
+    ]
+    for needle, resolved in address_map:
+        if needle in address_upper:
+            return resolved
+
+    dial_map = {
+        "971": "United Arab Emirates",
+        "91": "India",
+        "44": "United Kingdom",
+        "61": "Australia",
+        "1": "United States",
+    }
+    return dial_map.get(str(_MY_COUNTRY_DIAL_DIGITS or "").strip(), "India")
+
+
+MY_COUNTRY_NAME = _derive_country_name()
 
 # â”€â”€ Narrow viewport: isolates form sections like the RXR screenshot â”€â”€
 VIEWPORT_WIDTH  = 500   # narrow = fewer distractions, form columns stack vertically
@@ -360,6 +396,45 @@ def _short_field_key(raw_key: str) -> str:
     return short_k
 
 
+def _standardize_field_key(short_k: str) -> str:
+    """Map technical field keys to common names (Name, Email, Phone, etc)."""
+    k = str(short_k or "").lower()
+    
+    # Priority mappings for phone/tel
+    if any(x in k for x in ["phone", "tel", "mobile", "phno", "cell"]):
+        return "Phone"
+    
+    # Email
+    if "email" in k or "mail" in k:
+        return "Email"
+        
+    # Name mappings
+    if "first" in k or "fname" in k:
+        return "First Name"
+    if "last" in k or "lname" in k:
+        return "Last Name"
+    if "name" in k or "fullname" in k:
+        return "Name"
+        
+    # Message / Content
+    if any(x in k for x in ["message", "comment", "pitch", "description", "body"]):
+        return "Message"
+        
+    # Subject
+    if "subject" in k or "topic" in k or "regarding" in k:
+        return "Subject"
+        
+    # Company
+    if "company" in k or "organization" in k or "business" in k:
+        return "Company"
+        
+    # Website
+    if "website" in k or "url" in k or "site" in k:
+        return "Website"
+
+    return short_k
+
+
 def _is_honeypot_identifier(text: str) -> bool:
     return bool(HONEYPOT_FIELD_RE.search(str(text or "")))
 
@@ -392,10 +467,12 @@ def _format_field_for_logs(raw_key: str, raw_value, value_limit: int) -> str | N
     if _is_honeypot_identifier(raw_key) or _is_honeypot_identifier(short_k):
         return None
 
+    standard_k = _standardize_field_key(short_k)
+
     if _is_low_signal_field_value(short_k, value_text):
         return None
 
-    return f"{short_k}: {value_text[:value_limit]}"
+    return f"{standard_k}: {value_text[:value_limit]}"
 
 
 def _is_internal_log_key(raw_key: str) -> bool:
@@ -509,7 +586,7 @@ EXTRACT_FIELDS_JS = r"""
         var tag = el.tagName ? el.tagName.toLowerCase() : '';
         if (!['input', 'textarea', 'select'].includes(tag)) return;
         var type = (el.type || '').toLowerCase();
-        if (['hidden', 'submit', 'button', 'image', 'reset', 'file', 'search'].includes(type)) return;
+        if (['hidden', 'submit', 'button', 'image', 'reset', 'file', 'search', 'password'].includes(type)) return;
 
         var id = el.id || '';
         var name = el.name || '';
@@ -529,9 +606,7 @@ EXTRACT_FIELDS_JS = r"""
             var tag = (p.tagName || '').toLowerCase();
             var cls = (p.className || '').toLowerCase();
             var pid = (p.id || '').toLowerCase();
-            if (tag === 'nav' || tag === 'header' ||
-                cls.includes('search') || pid.includes('search') ||
-                cls.includes('nav') || cls.includes('header')) {
+            if (tag === 'nav' || ((cls.includes('search') || pid.includes('search')) && !cls.includes('form')) || cls.includes('nav')) {
                 inNav = true;
                 break;
             }
@@ -1124,16 +1199,24 @@ def _build_row(company_name, url, submitted, assurance,
     ]
 
 
-def _emit_result(company_name, url, submitted, assurance, captcha_status,
-                 proxy_label, bw_kb, tok_cols=None, filled_fields=None,
-                 sub_status="", confirmation_msg="", message_sent="",
-                 strategy="", discovery_method="", detected_form_url=""):
+def _emit_result(company_name, url, submitted, assurance, captcha_status, proxy_label, bw_kb, tok_cols=None, filled_fields=None, 
+                 sub_status="", confirmation_msg="", message_sent="", form_detected=None):
     """Print a [RESULT] JSON line to stdout for the dashboard to capture."""
     if tok_cols and len(tok_cols) == 7:
         tc = tok_cols
     else:
         tc = ["", 0, 0, 0, 0, 0, 0]
     fields_str = _format_submission_fields(filled_fields, max_items=15, value_limit=120)
+    if form_detected is None:
+        is_form_not_found = any(p in str(assurance).lower() for p in ['not found', 'no contact us form', 'unable to find', 'filled 0'])
+        form_detected_val = not is_form_not_found
+    else:
+        form_detected_val = bool(form_detected)
+    if form_detected is None:
+        is_form_not_found = any(p in str(assurance).lower() for p in ["not found", "no contact us form", "unable to find", "filled 0"])
+        form_detected_val = not is_form_not_found
+    else:
+        form_detected_val = bool(form_detected)
     submitted_text = str(submitted or "")
     submitted_yes = submitted_text.strip().lower() == "yes"
     captcha_text = str(captcha_status or "")
@@ -1181,13 +1264,11 @@ def _emit_result(company_name, url, submitted, assurance, captcha_status,
         "est_cost": str(tc[5]),
         "avg_tokens_call": str(tc[6]),
         "fields_filled": fields_str or "-",
+        "form_found": form_detected_val,
         "submission_status": str(sub_status or submitted),
         "confirmation_msg": str((confirmation_msg or assurance or ""))[:300],
         "message_sent": str(message_sent)[:500] if message_sent else "-",
         "step_index": _CURRENT_STEP_INDEX,
-        "strategy": str(strategy or "N/A"),
-        "discovery_method": str(discovery_method or "direct"),
-        "detected_form_url": str(detected_form_url or url),
     }
     # Include structured field data for the frontend's "Detailed Form Data" grid
     if isinstance(filled_fields, dict) and filled_fields:
@@ -1196,8 +1277,9 @@ def _emit_result(company_name, url, submitted, assurance, captcha_status,
             sk = _short_field_key(k)
             if sk and not _is_honeypot_identifier(sk) and not _is_internal_log_key(k):
                 val = str(v or "").strip()
-                if val and not _is_low_signal_field_value(sk, val):
-                    clean_data[sk] = val[:200]
+                if val:
+                    std_k = _standardize_field_key(sk)
+                    clean_data[std_k] = val[:200]
         if clean_data:
             result_obj["fields_filled_data"] = clean_data
     print(f"[RESULT] {json.dumps(result_obj)}", flush=True)
@@ -1671,21 +1753,8 @@ async def detect_and_solve_captcha(page, iframe=None):
     has_recaptcha = bool(
         re.search(r'class=["\'][^"\']*g-recaptcha', html, re.I) or
         re.search(r'recaptcha/api2/anchor|recaptcha/enterprise/anchor|recaptcha/api\.js', html, re.I) or
-        re.search(r'grecaptcha\.(render|execute|ready)\s*\(', html, re.I) or
-        re.search(r'www\.google\.com/recaptcha', html, re.I) or
-        re.search(r'g-recaptcha-response', html, re.I)
+        re.search(r'grecaptcha\.(render|execute|ready)\s*\(', html, re.I)
     )
-
-    # Selector-based fallback detection for reCAPTCHA v2
-    if not has_recaptcha:
-        try:
-            for src in [page] + page.frames:
-                if await src.locator('iframe[src*="google.com/recaptcha"]').count() > 0:
-                    has_recaptcha = True
-                    break
-        except Exception:
-            pass
-
     has_turnstile = bool(
         re.search(r'cf-turnstile|challenges\.cloudflare\.com/turnstile|turnstile\.render\s*\(', html, re.I)
     )
@@ -2058,9 +2127,6 @@ CONTACT_DISCOVERY_KEYWORDS = [
     "get-in-touch", "getintouch", "reach-us", "reach_us",
     "touch", "inquiry", "enquiry", "support", "help",
     "write-to-us", "talk-to-us", "connect", "reach",
-    "message", "sales", "billing", "question", "feedback",
-    "request", "demo", "enquire", "inquire", "support-contact",
-    "customer-service", "get-started", "start-conversation"
 ]
 
 CONTACT_DISCOVERY_COMMON_PATHS = [
@@ -2068,9 +2134,20 @@ CONTACT_DISCOVERY_COMMON_PATHS = [
     "/get-in-touch", "/reach-us", "/inquiry", "/enquiry",
     "/support/contact", "/about/contact", "/pages/contact",
     "/help/contact", "/connect", "/about-us/contact", "/reach", "/touch",
-    "/message", "/message-us", "/write-to-us", "/talk-to-us",
-    "/support/ticket", "/help-center", "/customer-care",
-    "/sales-contact", "/request-info", "/inquire-now", "/demo-request"
+    # PHP variants
+    "/contact.php", "/contact-us.php", "/contact_us.php", "/contactus.php",
+    "/inquiry.php", "/enquiry.php", "/feedback.php", "/reach-us.php",
+    "/get-in-touch.php", "/write-to-us.php",
+    # HTML variants
+    "/contact.html", "/contact-us.html", "/contactus.html",
+    "/contact.htm", "/contact-us.htm",
+    # ASP variants
+    "/contact.aspx", "/contact-us.aspx", "/contactus.aspx",
+    # JSP variants
+    "/contact.jsp",
+    # WordPress / common CMS
+    "/contact-us/", "/contact/", "/feedback", "/message", "/message-us",
+    "/send-message", "/request-info", "/request-information",
 ]
 
 _CONTACT_LINK_EXCLUDE_HINTS = (
@@ -2082,8 +2159,8 @@ _CONTACT_LINK_EXCLUDE_HINTS = (
 
 CONTACT_DISCOVERY_MAX_SECONDS = max(6, _env_int("CONTACT_DISCOVERY_MAX_SECONDS", 35))
 CONTACT_DISCOVERY_NAV_TIMEOUT_MS = max(2000, _env_int("CONTACT_DISCOVERY_NAV_TIMEOUT_MS", 9000))
-CONTACT_DISCOVERY_MAX_PATH_TRIES = max(2, min(16, _env_int("CONTACT_DISCOVERY_MAX_PATH_TRIES", 8)))
-CONTACT_DISCOVERY_MAX_LINK_TRIES = max(1, min(10, _env_int("CONTACT_DISCOVERY_MAX_LINK_TRIES", 4)))
+CONTACT_DISCOVERY_MAX_PATH_TRIES = max(2, min(30, _env_int("CONTACT_DISCOVERY_MAX_PATH_TRIES", 20)))
+CONTACT_DISCOVERY_MAX_LINK_TRIES = max(1, min(12, _env_int("CONTACT_DISCOVERY_MAX_LINK_TRIES", 6)))
 CONTACT_DISCOVERY_STEP_PAUSE_MS = max(0, min(1200, _env_int("CONTACT_DISCOVERY_STEP_PAUSE_MS", 350)))
 CONTACT_DISCOVERY_MIN_FIELDS = max(2, min(8, _env_int("CONTACT_DISCOVERY_MIN_FIELDS", 2)))
 
@@ -2161,108 +2238,52 @@ def _contact_discovery_timeout_ms(deadline_monotonic: float, default_ms: int) ->
     return min(int(default_ms), remaining_ms)
 
 
-async def _count_form_fields(page_or_frame) -> int:
-    res = await page_or_frame.evaluate("""() => {
-            const shadowScan = (root) => {
-                let found = Array.from(root.querySelectorAll('input, textarea, select'));
-                const all = root.querySelectorAll('*');
-                for (const el of all) {
-                    if (el.shadowRoot) {
-                        found = found.concat(shadowScan(el.shadowRoot));
-                    }
-                }
-                return found;
-            };
-
-            const controls = shadowScan(document).filter(el => {
-                const tag = (el.tagName || '').toLowerCase();
-                const type = String(el.type || '').toLowerCase();
-                if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search', 'file'].includes(type)) return false;
-
-                const nm = String(el.name || el.id || el.placeholder || '').toLowerCase();
-                if (/\bsearch\b|sf_s|zip.?code|keyword|flexdata/.test(nm)) return false;
-                if (/(wpcf7_ak_hp|honeypot|honey[_-]?pot|ak_hp|bot.?trap|leave.?blank|do.?not.?fill|nospam)/.test(nm)) return false;
-                return true;
-            });
-            
-            if (controls.length === 0) {
-                // Last ditch: any inputs at all that aren't hidden
-                return shadowScan(document).filter(el => 
-                    el.tagName === 'INPUT' && el.type !== 'hidden' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
-                ).length;
-            }
-            return controls.length;
-        }""")
-    return int(res or 0)
-
-
 async def _has_form_signal_for_discovery(page) -> bool:
     min_fields = int(CONTACT_DISCOVERY_MIN_FIELDS)
     js_checked = False
 
     try:
-        stats = await page.evaluate("""(cfg) => {
+        stats = await page.evaluate(f"""(cfg) => {{
+            {SHADOW_DOM_PIERCING_SCRIPT}
             const minFields = Math.max(2, Number(cfg?.minFields || 3));
-            
-            const shadowScan = (root) => {
-                let found = Array.from(root.querySelectorAll('input, textarea, select'));
-                const all = root.querySelectorAll('*');
-                for (const el of all) {
-                    if (el.shadowRoot) {
-                        found = found.concat(shadowScan(el.shadowRoot));
-                    }
-                }
-                return found;
-            };
-
-            const isVisible = (el) => {
+            const isVisible = (el) => {{
                 if (!el) return false;
                 const r = el.getBoundingClientRect();
-                if (r.width < 1 || r.height < 1) return false;
+                if (r.width === 0 && r.height === 0) {{
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                }}
                 const cs = getComputedStyle(el);
                 return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
-            };
+            }};
 
-            const controls = shadowScan(document).filter(el => {
+            const allSubElements = getAllElements();
+            const controls = allSubElements.filter(el => {{
                 const tag = String(el.tagName || '').toLowerCase();
                 const type = String(el.type || '').toLowerCase();
-                if (tag === 'input' && ['hidden','submit','button','image','reset','search','file'].includes(type)) return false;
+                if (!['input', 'textarea', 'select'].includes(tag)) return false;
+                if (tag === 'input' && ['hidden','submit','button','image','reset','search','file','password'].includes(type)) return false;
                 const nm = String(el.name || el.id || el.placeholder || '').toLowerCase();
-                if (/\bsearch\b|sf_s|zip.?code|keyword/.test(nm)) return false;
-                if (/(wpcf7_ak_hp|honeypot|honey[_-]?pot|ak_hp|bot.?trap|leave.?blank|do.?not.?fill|nospam)/.test(nm)) return false;
+                if (/\\bsearch\\b|sf_s|zip.?code|keyword/.test(nm)) return false;
                 return isVisible(el);
-            });
+            }});
 
             const contactLikeRe = /(name|email|mail|phone|mobile|message|comment|subject|company|organization|enquir|inquir|details|address)/i;
             let contactLike = 0;
-            controls.forEach(el => {
-                const meta = [
-                    el.name || '',
-                    el.id || '',
-                    el.placeholder || '',
-                    el.getAttribute('aria-label') || '',
-                    el.getAttribute('autocomplete') || ''
-                ].join(' ');
+            controls.forEach(el => {{
+                const meta = (el.name||'')+' '+(el.id||'')+' '+(el.placeholder||'')+' '+(el.getAttribute('aria-label')||'');
                 if (contactLikeRe.test(meta)) contactLike += 1;
-            });
+            }});
 
             const hasEmail = controls.some(el => String(el.type || '').toLowerCase() === 'email');
             const hasTextarea = controls.some(el => String(el.tagName || '').toLowerCase() === 'textarea');
-            const hasForm = !!document.querySelector('form') || !!document.querySelector('[class*="form"]');
-
             const total = controls.length;
-            const isSelectOnly = total > 0 && controls.every(el => el.tagName === 'SELECT');
-            const strongSignal = (contactLike >= 2) || hasTextarea || hasEmail || (hasForm && total >= 2);
-
-            return {
-                total,
-                contactLike,
-                hasTextarea,
-                hasEmail,
-                hasForm,
-                signal: (total >= 1 && (strongSignal || total >= minFields || isSelectOnly)),
-            };
-        }""", {"minFields": min_fields})
+            const strongSignal = (contactLike >= 2) || hasTextarea || (hasEmail);
+            
+            return {{ 
+                signal: (total >= 2) && (strongSignal || total >= minFields)
+            }};
+        }}""", {"minFields": min_fields})
 
         js_checked = True
         if bool((stats or {}).get("signal", False)):
@@ -2364,11 +2385,37 @@ async def _discover_contact_url_on_site(page, input_url: str, company_name: str 
     try:
         links = await page.evaluate("""() => {
             const out = [];
+            // Standard <a> tags
             document.querySelectorAll('a[href]').forEach(a => {
                 const href = String(a.href || '').trim();
                 const text = String(a.innerText || a.textContent || '').trim().toLowerCase().replace(/\\s+/g, ' ').slice(0, 120);
                 if (href) out.push({ href, text });
             });
+
+            // Extract URLs from raw page source (Ctrl+U view)
+            // This catches links in comments, data attributes, scripts, etc.
+            const html = document.documentElement.outerHTML || '';
+            const urlRe = /(?:href|action|src|data-url|data-href)\\s*=\\s*["']([^"'\\s]{5,200})["']/gi;
+            let m;
+            const seenHrefs = new Set(out.map(o => o.href));
+            while ((m = urlRe.exec(html)) !== null) {
+                const raw = String(m[1] || '').trim();
+                if (!raw || seenHrefs.has(raw)) continue;
+                // Only keep if it looks contact-related
+                const lower = raw.toLowerCase();
+                if (/(contact|enquiry|inquiry|reach|touch|feedback|message|write.*us|send.*message|request.*info)/i.test(lower)) {
+                    // Convert relative to absolute
+                    let abs = raw;
+                    try {
+                        abs = new URL(raw, window.location.origin).href;
+                    } catch(e) {}
+                    if (abs && !seenHrefs.has(abs)) {
+                        seenHrefs.add(abs);
+                        out.push({ href: abs, text: 'source:' + lower.split('/').pop().slice(0, 40) });
+                    }
+                }
+            }
+
             return out;
         }""")
     except Exception:
@@ -2466,57 +2513,67 @@ FORM_SELECTORS = [
     "select",
     "input[name*='name' i]",
     "input[name*='email' i]",
-    "input[placeholder*='name' i]",
     "input[placeholder*='email' i]",
+    "input[id*='email' i]",
+    "input[name*='phone' i]",
+    "input[id*='phone' i]",
+    "textarea",
+    "input[type='tel']",
 ]
 
 FORM_CONTAINER_SELECTORS = [
     "form",
-    ".contact-form", ".contact_form",
+    ".contact-form", ".contact_form", ".contact",
     "[class*='wpcf7']", "[class*='gform_wrapper']",
     "[class*='wpforms']", "[class*='hsForm']",
     "[class*='contact-form']", "[class*='contactform']",
     "[id*='contact']", "[id*='form']",
     ".elementor-form", "[class*='ninja-forms']",
+    "[class*='et_pb_contact_form']", "[class*='elementor-widget-container']",
 ]
 
 
 async def _count_form_fields(frame_or_page) -> int:
     try:
-        return await frame_or_page.evaluate("""() => {
-            return Array.from(document.querySelectorAll(
-                'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]):not([type="search"]), textarea, select'
-            )).filter(el => {
+        return await frame_or_page.evaluate(f"""() => {{
+            {SHADOW_DOM_PIERCING_SCRIPT}
+            return getAllElements().filter(el => {{
+                const tag = (el.tagName || '').toLowerCase();
+                if (!['input', 'textarea', 'select'].includes(tag)) return false;
+                
+                const type = (el.type || '').toLowerCase();
+                if (tag === 'input' && ['hidden','submit','button','image','reset','search','file','password'].includes(type)) return false;
+
                 const r = el.getBoundingClientRect();
-                // Inside an iframe, elements might report 0 width if the frame itself is transition-hidden
-                if (r.width === 0 && r.height === 0) {
+                // Inside an iframe or shadow root, elements might report 0 width if transition-hidden or not yet painted
+                if (r.width === 0 && r.height === 0) {{
                     const style = window.getComputedStyle(el);
                     if (style.display === 'none' || style.visibility === 'hidden') return false;
-                }
+                }}
                 
                 // Skip search-related fields
                 const nm = (el.name || el.id || el.placeholder || '').toLowerCase();
-                if (/\bsearch\b|sf_s|zip.?code|keyword/.test(nm)) return false;
+                if (/\\bsearch\\b|sf_s|zip.?code|keyword/.test(nm)) return false;
                 
-                // Skip fields inside nav/header/search containers
+                // textarea is almost ALWAYS a high signal for a contact form
+                if (tag === 'textarea') return true;
+
+                // Skip fields inside nav/header tags (actual navigation components)
                 let p = el.parentElement;
-                for (let d = 0; d < 8 && p; d++) {
+                while (p) {{
                     const tag = (p.tagName || '').toLowerCase();
+                    if (['nav'].includes(tag)) return false;
+                    
+                    // Specific check for search boxes in navbars
                     const cls = (p.className || '').toLowerCase();
                     const pid = (p.id || '').toLowerCase();
-                    if (tag === 'nav' || tag === 'header' ||
-                        cls.includes('search') || pid.includes('search')) return false;
+                    if ((cls.includes('search') || pid.includes('search')) && !cls.includes('form')) return false;
+
                     p = p.parentElement;
-                }
+                }}
                 return true;
-            }).length;
-            if (res === 0) {
-                // Relaxed check: if no fields found, check for any inputs at all that are not hidden
-                // on some sites forms use custom components or inputs without standard types
-                return document.querySelectorAll('input:not([type="hidden"]), textarea, select').length;
-            }
-            return res;
-        }""")
+            }}).length;
+        }}""")
     except Exception:
         return 0
 
@@ -2571,6 +2628,24 @@ async def _scroll_until_form(page, max_scroll_px=5000) -> bool:
 
 
 async def find_form_target(page, url):
+    async def _probe_current_page(success_label: str):
+        fc = await _count_form_fields(page)
+        if fc > 0:
+            print(f"   [FormFinder] {success_label}: {fc} fields")
+            return page, success_label
+        for frame in page.frames:
+            try:
+                fu = (frame.url or "").lower()
+                if not fu.startswith("http"):
+                    continue
+                fc2 = await _count_form_fields(frame)
+                if fc2 > 1:
+                    print(f"   [FormFinder] {success_label}: iframe {fu[:60]} ({fc2} fields)")
+                    return frame, f"{success_label}-iframe"
+            except Exception:
+                continue
+        return None
+
     # Strategy 1: fields already visible
     field_count = await _count_form_fields(page)
     if field_count > 0:
@@ -2615,15 +2690,10 @@ async def find_form_target(page, url):
     # Strategy 5: click contact links
     print(f"   [FormFinder] S5: Contact links...")
     contact_link_selectors = [
-        "a[href*='contact' i]","a[href*='reach' i]","a[href*='touch' i]","a[href*='connect' i]",
-        "a[href*='message' i]","a[href*='support' i]","a[href*='inquiry' i]","a[href*='enquiry' i]",
+        "a[href*='contact' i]","a[href*='reach' i]","a[href*='touch' i]",
         "a:has-text('Contact Us')","a:has-text('Contact')",
         "a:has-text('Get in Touch')","a:has-text('Write to Us')",
-        "a:has-text('Connect')","a:has-text('Talk to a')",
-        "a:has-text('Message Us')","a:has-text('Send a Message')",
-        "a:has-text('Inquire')","a:has-text('Enquire')",
-        "button:has-text('Contact')", "button:has-text('Message')",
-        "nav a[href*='contact' i]","footer a[href*='contact' i]","nav a[href*='connect' i]",
+        "nav a[href*='contact' i]","footer a[href*='contact' i]",
     ]
     for sel in contact_link_selectors:
         try:
@@ -2657,6 +2727,152 @@ async def find_form_target(page, url):
         except Exception:
             continue
 
+    # Strategy 5b: CTA buttons / modal / accordion triggers on the same page
+    print(f"   [FormFinder] S5b: CTA buttons / modal triggers...")
+    try:
+        trigger_locator = page.locator(
+            "button, a, [role='button'], summary, [data-bs-toggle], [data-toggle], [onclick], .elementor-button"
+        )
+        candidate_rows = []
+        limit = min(await trigger_locator.count(), 240)
+        for idx in range(limit):
+            cand = trigger_locator.nth(idx)
+            try:
+                if not await cand.is_visible():
+                    continue
+                meta = await cand.evaluate("""el => {
+                    const text = String(el.innerText || el.textContent || el.value || '').trim();
+                    const href = String(el.getAttribute('href') || '').trim();
+                    const aria = String(el.getAttribute('aria-label') || '').trim();
+                    const cls = String(el.className || '').trim();
+                    const id = String(el.id || '').trim();
+                    const name = String(el.name || '').trim();
+                    const dataBsToggle = String(el.getAttribute('data-bs-toggle') || '').trim();
+                    const dataToggle = String(el.getAttribute('data-toggle') || '').trim();
+                    const ariaControls = String(el.getAttribute('aria-controls') || '').trim();
+                    const ariaExpanded = String(el.getAttribute('aria-expanded') || '').trim();
+                    const tag = String(el.tagName || '').toLowerCase();
+                    const role = String(el.getAttribute('role') || '').toLowerCase();
+                    const type = String(el.getAttribute('type') || '').toLowerCase();
+
+                    let inNav = false;
+                    let inSearch = false;
+                    let inForm = false;
+                    let p = el;
+                    while (p) {
+                        const tagName = String(p.tagName || '').toLowerCase();
+                        const blob = [
+                            p.id || '',
+                            p.className || '',
+                            p.getAttribute ? (p.getAttribute('role') || '') : '',
+                            p.getAttribute ? (p.getAttribute('action') || '') : '',
+                        ].join(' ').toLowerCase();
+                        if (tagName === 'nav' || tagName === 'header') inNav = true;
+                        if (tagName === 'form') {
+                            inForm = true;
+                            if (/search/.test(blob)) inSearch = true;
+                        }
+                        if (/search|newsletter|subscribe/.test(blob)) inSearch = true;
+                        p = p.parentElement;
+                    }
+
+                    return {
+                        text,
+                        href,
+                        aria,
+                        cls,
+                        id,
+                        name,
+                        dataBsToggle,
+                        dataToggle,
+                        ariaControls,
+                        ariaExpanded,
+                        tag,
+                        role,
+                        type,
+                        inNav,
+                        inSearch,
+                        inForm,
+                    };
+                }""")
+            except Exception:
+                continue
+
+            if not isinstance(meta, dict):
+                continue
+
+            blob = " ".join([
+                str(meta.get("text", "") or ""),
+                str(meta.get("href", "") or ""),
+                str(meta.get("aria", "") or ""),
+                str(meta.get("cls", "") or ""),
+                str(meta.get("id", "") or ""),
+                str(meta.get("name", "") or ""),
+                str(meta.get("ariaControls", "") or ""),
+            ]).strip().lower()
+            href = str(meta.get("href", "") or "").strip().lower()
+            if meta.get("inNav") or meta.get("inSearch"):
+                continue
+            if meta.get("inForm") and str(meta.get("tag", "") or "").lower() == "button":
+                continue
+            if not blob:
+                continue
+            if any(x in href for x in ["mailto:", "tel:", "facebook", "linkedin", "twitter", "instagram", "youtube", "wa.me"]):
+                continue
+            if re.search(r"\b(search|newsletter|subscribe|login|sign\s*in|sign\s*up|register|cart|menu|download)\b", blob):
+                continue
+
+            score = 0
+            if re.search(r"\b(contact|contact us|get in touch|reach out|message us|talk to us|lets talk|let's talk)\b", blob):
+                score += 6
+            if re.search(r"\b(request a quote|request quote|get quote|quote|consult|consultation|demo|book|schedule|start project|work with us|enquir|inquir)\b", blob):
+                score += 5
+            if str(meta.get("dataBsToggle", "") or "").lower() == "modal" or str(meta.get("dataToggle", "") or "").lower() == "modal":
+                score += 6
+            if str(meta.get("ariaExpanded", "") or "").strip():
+                score += 2
+            if str(meta.get("ariaControls", "") or "").strip():
+                score += 2
+            if href.startswith("#"):
+                score += 3
+            if any(key in blob for key in ["modal", "popup", "drawer", "accordion", "contact-form", "quote-form"]):
+                score += 4
+            if score < 5:
+                continue
+
+            candidate_rows.append((score, idx, str(meta.get("text", "") or meta.get("aria", "") or href or "cta")))
+
+        candidate_rows.sort(key=lambda item: (-item[0], item[1]))
+        for score, idx, hint in candidate_rows[:10]:
+            cand = trigger_locator.nth(idx)
+            clicked = False
+            for kwargs in ({}, {"force": True}):
+                try:
+                    await cand.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                try:
+                    print(f"   [FormFinder] S5b: clicking '{hint[:50]}' (score={score})")
+                    await cand.click(timeout=2500, **kwargs)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                continue
+
+            await asyncio.sleep(2.5)
+            try:
+                await _scroll_until_form(page)
+            except Exception:
+                pass
+            probed = await _probe_current_page("cta-trigger")
+            if probed:
+                return probed
+    except Exception:
+        pass
+
     # Strategy 6: lazy containers
     print(f"   [FormFinder] S6: Hidden containers...")
     try:
@@ -2678,6 +2894,43 @@ async def find_form_target(page, url):
             if fc > 0:
                 print(f"   [FormFinder] S6 success via {found_container}: {fc} fields")
                 return page, f"container-{found_container}"
+    except Exception:
+        pass
+
+    # Strategy 7: Deep scroll + extended JS wait (catches React/lazy-loaded forms that
+    # need to finish loading after a full scroll-to-bottom pass).
+    print(f"   [FormFinder] S7: Deep scroll + extended wait...")
+    try:
+        # Scroll page in big steps all the way to the bottom
+        await page.evaluate("""async () => {
+            const delay = (ms) => new Promise(r => setTimeout(r, ms));
+            const total = document.body.scrollHeight || 5000;
+            let y = 0;
+            while (y < total) {
+                window.scrollTo(0, y);
+                await delay(200);
+                y += 600;
+            }
+            window.scrollTo(0, 0);
+        }""")
+        await asyncio.sleep(2.0)
+        # One more check after the full scroll-and-wait
+        fc = await _count_form_fields(page)
+        if fc > 0:
+            print(f"   [FormFinder] S7 success: {fc} fields after deep scroll")
+            return page, "deep-scroll"
+        # Also check iframes that may have loaded lazily
+        for frame in page.frames:
+            try:
+                fu = (frame.url or "").lower()
+                if not fu.startswith("http"):
+                    continue
+                fc2 = await _count_form_fields(frame)
+                if fc2 > 0:
+                    print(f"   [FormFinder] S7 success: iframe {fu[:60]} ({fc2} fields)")
+                    return frame, "iframe-lazy"
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -2800,7 +3053,12 @@ RULES:
 - Allowed actions: fill, select, check, click, done.
 - Use selector values exactly from FIELD_CATALOG_JSON.
 - Fill required and relevant visible fields first.
+- Fill only high-confidence contact fields: first/last/full name, email, phone, company, website, subject, message, country, postal code.
 - Choose non-placeholder options for selects.
+- For reason/topic/category selects, prefer General Inquiry / Contact / Other when available.
+- Never invent budget, revenue, employee count, project timeline, meeting date, file upload, or other unsupported facts.
+- Skip ambiguous generic text fields unless the label/name/id clearly identifies the expected value.
+- Do not fill search, newsletter, login, captcha, date/time, quantity, or file-upload fields.
 - Use dial code {MY_COUNTRY_DIAL_CODE}; phone intl {MY_PHONE_INTL_E164}; phone local {MY_PHONE}.
 - End with {{"action":"done"}}.
 
@@ -2811,8 +3069,9 @@ Phone={MY_PHONE}
 PhoneIntl={MY_PHONE_INTL_E164}
 Company={MY_COMPANY}
 Website={MY_WEBSITE}
-Country=India
+Country={MY_COUNTRY_NAME}
 Zip={MY_PIN_CODE}
+JobTitle={_safe_prompt_text(MY_JOB_TITLE, 60)}
 Subject={_safe_prompt_text(subject, subject_chars)}
 Message={_safe_prompt_text(pitch, pitch_chars)}
 
@@ -2858,6 +3117,9 @@ RULES:
 - Allowed actions: fill, select, check, click, done.
 - Use selectors exactly from FIELD_CATALOG_JSON.
 - Prefer required fields first.
+- Fill only high-confidence contact fields; skip ambiguous or unrelated business-profile questions.
+- For reason/topic/category selects, prefer General Inquiry / Contact / Other when available.
+- Never invent budget, employee count, revenue, timeline, appointment, or upload data.
 - Use dial code {MY_COUNTRY_DIAL_CODE}; intl phone {MY_PHONE_INTL_E164}; local phone {MY_PHONE}.
 - End with {{"action":"done"}}.
 
@@ -2866,6 +3128,8 @@ Name={MY_FULL_NAME}
 Email={MY_EMAIL}
 Company={MY_COMPANY}
 Website={MY_WEBSITE}
+Country={MY_COUNTRY_NAME}
+JobTitle={_safe_prompt_text(MY_JOB_TITLE, 60)}
 Subject={_safe_prompt_text(subject, subject_chars)}
 Message={_safe_prompt_text(pitch, pitch_chars)}
 
@@ -3314,11 +3578,12 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a deterministic web form action planner. Output only a JSON array.",
+                            "content": "You are a deterministic, conservative web form action planner. Output only a JSON array and never invent values for ambiguous fields.",
                         },
                         {"role": "user", "content": attempt_prompt},
                     ],
                     max_completion_tokens=out_cap,
+                    temperature=0,
                 )
                 if resp.usage:
                     token_tracker.record(company_name, tracked_call_type, resp.usage, worker_index)
@@ -3353,17 +3618,8 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
         fb = await _js_fallback_fill(page, company_name, pitch, subject)
         return fb, {}
 
-    async def _execute_actions(actions_list, selector_guard_local: dict, phase_label="pass", elements_meta=None):
+    async def _execute_actions(actions_list, selector_guard_local: dict, phase_label="pass"):
         nonlocal total_filled, filled_values
-        elements_meta = elements_meta or []
-        
-        # Build map for label lookup
-        label_map = {}
-        for e in elements_meta:
-            sel = e.get("sel")
-            lbl = e.get("label") or e.get("name") or e.get("id") or ""
-            if sel and lbl:
-                label_map[sel] = lbl
 
         applied = 0
         for act in actions_list:
@@ -3492,8 +3748,7 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
                             pass
                     if filled:
                         print(f"   [{company_name[:20]}] [{phase_label}] + fill {selector[:35]} = {target_value[:25]}")
-                        key_name = label_map.get(selector) or selector
-                        filled_values[key_name] = target_value
+                        filled_values[selector] = target_value
                         total_filled += 1
                         applied += 1
 
@@ -3745,7 +4000,7 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
         return applied
 
     # Execute first GPT action plan
-    await _execute_actions(actions, selector_guard, phase_label="pass1", elements_meta=elements)
+    await _execute_actions(actions, selector_guard, phase_label="pass1")
 
     # Detect still-empty fields and run a second GPT completion pass.
     missing_elements = []
@@ -3867,7 +4122,7 @@ async def gpt_fill_form(page, target, company_name, pitch, subject, worker_index
         try:
             retry_actions = await _request_actions_with_recovery(retry_prompt, "form_fill_retry", retry_guard)
             if retry_actions:
-                await _execute_actions(retry_actions, retry_guard, phase_label="pass2", elements_meta=missing_elements)
+                await _execute_actions(retry_actions, retry_guard, phase_label="pass2")
         except Exception as e:
             print(f"   [{company_name[:20]}] [GPT] pass2 skipped: {str(e)[:80]}")
 
@@ -3889,6 +4144,9 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
     try:
         pitch_e   = pitch.replace('`', '\\`').replace('${', '\\${')
         subject_e = subject.replace('`', '\\`').replace('${', '\\${')
+        country_e = MY_COUNTRY_NAME.replace('`', '\\`').replace('${', '\\${')
+        address_e = MY_ADDRESS.replace('`', '\\`').replace('${', '\\${')
+        job_title_e = MY_JOB_TITLE.replace('`', '\\`').replace('${', '\\${')
         n = await page.evaluate(f"""() => {{
             let n = 0;
             const RF = (el, val) => {{
@@ -3903,7 +4161,7 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 n++;
             }};
             document.querySelectorAll('input,textarea,select').forEach(el => {{
-                if (['hidden','submit','button','image','reset','search'].includes(el.type)) return;
+                if (['hidden','submit','button','image','reset','search','file','date','datetime-local','month','week','time','number'].includes(el.type)) return;
                 
                 var nm2 = (el.name || el.id || el.placeholder || '').toLowerCase();
                 if (/\bsearch\b|sf_s|keyword|flexdata/.test(nm2)) return;
@@ -3928,32 +4186,57 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 const h = nm + ' ' + lbl;
                 if (el.tagName === 'SELECT') {{
                     const opts = Array.from(el.options).filter(o => o.text.trim() && !/^(--|choose|select|please)/i.test(o.text));
-                    if (opts.length) {{
-                        const reasonLike = /(reason|inquiry|enquiry|subject|topic|type|category|purpose|regarding|role|audience|interest|intent|query|contact type)/.test(h);
-                        const score = (o) => {{
-                            const t = String(o.text || '').toLowerCase().trim();
-                            let s = 1;
-                            if (reasonLike) {{
-                                if (/\bgeneral inquiry\b/.test(t) || (/\bgeneral\b/.test(t) && /\b(inquiry|enquiry|question|contact)\b/.test(t))) s += 120;
-                                if (/\bother\b/.test(t)) s += 100;
-                            }} else if (/\bother\b/.test(t)) s += 10;
-                            return s;
-                        }};
+                    if (!opts.length) return;
 
-                        let pick = opts[0];
-                        let bestScore = score(pick);
-                        for (const o of opts) {{
-                            const sc = score(o);
-                            if (sc > bestScore) {{
-                                pick = o;
-                                bestScore = sc;
-                            }}
+                    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9+]+/g, ' ').trim();
+                    const reasonLike = /(reason|inquiry|enquiry|subject|topic|type|category|purpose|regarding|role|audience|interest|intent|query|contact type)/.test(h);
+                    const countryLike = /(country|nation)/.test(h) && !/(country code|dial code|calling code|isd|phone code)/.test(h);
+                    const dialLike = /(country code|dial code|calling code|isd|phone code|prefix)/.test(h);
+                    const countryNorm = norm(`{country_e}`);
+                    const dialDigits = String('{MY_COUNTRY_DIAL_CODE}').replace(/\\D+/g, '');
+
+                    const score = (o) => {{
+                        const t = norm(String(o.text || ''));
+                        const v = norm(String(o.value || ''));
+                        if (!t) return -1;
+                        if (dialLike) {{
+                            if (dialDigits && (t.includes(dialDigits) || v.includes(dialDigits))) return 300;
+                            if (countryNorm && (t.includes(countryNorm) || v.includes(countryNorm))) return 260;
+                            return -1;
                         }}
+                        if (countryLike) {{
+                            if (countryNorm && (t === countryNorm || t.includes(countryNorm) || countryNorm.includes(t))) return 300;
+                            if (countryNorm === 'united arab emirates' && /\buae\b/.test(t)) return 280;
+                            if (countryNorm === 'united states' && /\busa\b/.test(t)) return 280;
+                            if (countryNorm === 'united kingdom' && /\buk\b/.test(t)) return 280;
+                            return -1;
+                        }}
+                        if (reasonLike) {{
+                            let s = 1;
+                            if (/\bgeneral inquiry\b/.test(t) || (/\bgeneral\b/.test(t) && /\b(inquiry|enquiry|question|contact)\b/.test(t))) s += 140;
+                            if (/\bcontact\b/.test(t)) s += 70;
+                            if (/\bother\b/.test(t)) s += 120;
+                            if (/\bmessage\b/.test(t)) s += 30;
+                            return s;
+                        }}
+                        return -1;
+                    }};
 
-                        el.value = pick.value;
-                        el.dispatchEvent(new Event('change',{{bubbles:true}}));
-                        n++;
+                    let pick = null;
+                    let bestScore = -1;
+                    for (const o of opts) {{
+                        const sc = score(o);
+                        if (sc > bestScore) {{
+                            pick = o;
+                            bestScore = sc;
+                        }}
                     }}
+
+                    if (!pick || bestScore < 0) return;
+
+                    el.value = pick.value;
+                    el.dispatchEvent(new Event('change',{{bubbles:true}}));
+                    n++;
                     return;
                 }}
                 if (el.type === 'checkbox') {{ if(!el.checked){{el.checked=true;n++;}} return; }}
@@ -3966,13 +4249,14 @@ async def _js_fallback_fill(page, company_name, pitch, subject) -> int:
                 if (h.includes('name')||h.includes('contact')) {{ RF(el,'{MY_FULL_NAME}'); return; }}
                 if (h.includes('company')||h.includes('org')) {{ RF(el,'{MY_COMPANY}'); return; }}
                 if (h.includes('website')||h.includes('url')||h.includes('site')) {{ RF(el,'{MY_WEBSITE}'); return; }}
+                if ((h.includes('job')&&h.includes('title'))||h.includes('designation')||h.includes('position')||(/\brole\b/.test(h) && !/\bmessage\b/.test(h))) {{ if (`{job_title_e}`) RF(el,'{job_title_e}'); return; }}
                 if (h.includes('subject')||h.includes('topic')) {{ RF(el,`{subject_e}`); return; }}
-                if (h.includes('budget')||h.includes('amount')) {{ RF(el,'10000'); return; }}
+                if (h.includes('budget')||h.includes('amount')||h.includes('revenue')||h.includes('employee')||h.includes('timeline')) return;
                 if (isCountryCodeLike) {{ RF(el,'{MY_COUNTRY_DIAL_CODE}'); return; }}
-                if (h.includes('country') && !isCountryCodeLike) {{ RF(el,'India'); return; }}
+                if (h.includes('country') && !isCountryCodeLike) {{ RF(el,'{country_e}'); return; }}
                 if (h.includes('zip')||h.includes('postal')||h.includes('pin')) {{ RF(el,'{MY_PIN_CODE}'); return; }}
+                if (h.includes('address')) {{ RF(el,'{address_e}'); return; }}
                 if (el.tagName==='TEXTAREA'||h.includes('message')||h.includes('comment')) {{ RF(el,`{pitch_e}`); return; }}
-                if (el.type==='text') {{ RF(el,'{MY_FULL_NAME}'); return; }}
             }});
             return n;
         }}""")
@@ -4148,7 +4432,10 @@ async def ensure_required_dropdowns(page, target, company_name="") -> int:
 
     for src in sources:
         try:
-            changed = await src.evaluate("""() => {
+            changed = await src.evaluate("""(payload) => {
+                const countryName = String(payload.countryName || '').trim();
+                const dialCode = String(payload.dialCode || '').trim();
+                const dialDigits = dialCode.replace(/\\D+/g, '');
                 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
                 const isPlaceholder = (label, value) => {
                     const t = norm(label);
@@ -4254,11 +4541,15 @@ async def ensure_required_dropdowns(page, target, company_name="") -> int:
                 };
 
                 const isLikelyImportantDropdown = (meta) => {
-                    return /(price|range|budget|residence|referr|how were you referred|broker|agent|real\\s*estate|inquiry|enquiry|reason|subject|type|category|purpose|country|state|city)/.test(meta);
+                    return /(inquiry|enquiry|reason|subject|type|category|purpose|country|country code|dial code|calling code|isd|phone code)/.test(meta);
                 };
 
                 const isReasonLike = (meta) =>
                     /(reason|inquiry|enquiry|subject|topic|type|category|purpose|regarding|role|audience|interest|intent|query|contact type)/.test(meta);
+                const isCountryLike = (meta) =>
+                    /(country|nation)/.test(meta) && !/(country code|dial code|calling code|isd|phone code)/.test(meta);
+                const isDialLike = (meta) =>
+                    /(country code|dial code|calling code|isd|phone code)/.test(meta);
 
                 const scoreOption = (o, meta) => {
                     const txt = optionText(o);
@@ -4266,14 +4557,31 @@ async def ensure_required_dropdowns(page, target, company_name="") -> int:
                     if (isPlaceholder(txt, val)) return -1;
 
                     const t = norm(txt);
+                    const v = norm(val);
                     let score = 1;
+
+                    if (isDialLike(meta)) {
+                        if (dialDigits && (t.includes(dialDigits) || v.includes(dialDigits))) return 320;
+                        if (countryName && (t.includes(norm(countryName)) || v.includes(norm(countryName)))) return 280;
+                        return -1;
+                    }
+
+                    if (isCountryLike(meta)) {
+                        const countryNorm = norm(countryName);
+                        if (countryNorm && (t === countryNorm || t.includes(countryNorm) || countryNorm.includes(t))) return 320;
+                        if (countryNorm === 'united arab emirates' && /\buae\b/.test(t)) return 300;
+                        if (countryNorm === 'united states' && /\busa\b/.test(t)) return 300;
+                        if (countryNorm === 'united kingdom' && /\buk\b/.test(t)) return 300;
+                        return -1;
+                    }
 
                     if (isReasonLike(meta)) {
                         if (/\bgeneral inquiry\b/.test(t) || (/\bgeneral\b/.test(t) && /\b(inquiry|enquiry|question|contact)\b/.test(t))) score += 220;
+                        if (/\bcontact\b/.test(t)) score += 80;
                         if (/\bother\b/.test(t)) score += 200;
                         if (/\bnone of the above\b/.test(t)) score += 180;
                     } else {
-                        if (/\bother\b/.test(t)) score += 20;
+                        return -1;
                     }
 
                     return score;
@@ -4395,7 +4703,7 @@ async def ensure_required_dropdowns(page, target, company_name="") -> int:
                 }
 
                 return n;
-            }""")
+            }""", {"countryName": MY_COUNTRY_NAME, "dialCode": MY_COUNTRY_DIAL_CODE})
             fixed += int(changed or 0)
         except Exception:
             continue
@@ -5822,9 +6130,9 @@ async def ensure_consent_by_heuristics(page, target, company_name="") -> int:
 #   CHECKBOXES
 # ============================================================
 
-async def handle_checkboxes(target, company_name="") -> int:
+async def handle_checkboxes(target, company_name="") -> dict:
     """Prefer 'Other' choices, then ensure required/consent checks are selected."""
-    fixed = 0
+    fixed_details = {}
 
     # JS-first approach: supports hidden/custom widgets and label-based option choice.
     try:
@@ -5905,6 +6213,12 @@ async def handle_checkboxes(target, company_name="") -> int:
             };
 
             let n = 0;
+            let details = {};
+            const recordFix = (el) => {
+                n += 1;
+                details['Checkbox_' + (el.name || el.id || labelText(el).substring(0, 25) || 'n'+n).trim()] = 'checked';
+            };
+
             const controls = Array.from(document.querySelectorAll('input[type="checkbox"], input[type="radio"]'));
 
             // Pass 1: if an option is labeled "Other", select it.
@@ -5913,7 +6227,7 @@ async def handle_checkboxes(target, company_name="") -> int:
                 const meta = metaText(el);
                 if (!isOtherMeta(meta)) continue;
 
-                if (tryCheck(el)) n += 1;
+                if (tryCheck(el)) recordFix(el);
 
                 // For option-style siblings, prefer only "Other".
                 const box = el.closest('fieldset, .form-group, .gfield, .hs-form-field, .wpcf7-form-control-wrap, form, div');
@@ -5939,7 +6253,7 @@ async def handle_checkboxes(target, company_name="") -> int:
                 if (!el || el.disabled || el.checked) continue;
                 const meta = metaText(el);
                 if (!(isRequired(el) || isConsentMeta(meta))) continue;
-                if (tryCheck(el)) n += 1;
+                if (tryCheck(el)) recordFix(el);
             }
 
             // Pass 3: required option groups where none selected (e.g. "(required)" checkbox groups).
@@ -5974,7 +6288,7 @@ async def handle_checkboxes(target, company_name="") -> int:
                 if (!groupNeedsSelection(groupMeta, members)) continue;
 
                 const preferred = members.find(m => isOtherMeta(metaText(m))) || members.find(m => !m.disabled) || null;
-                if (preferred && tryCheck(preferred)) n += 1;
+                if (preferred && tryCheck(preferred)) recordFix(preferred);
             }
 
             // Name-based fallback for grouped options outside fieldsets.
@@ -5992,7 +6306,7 @@ async def handle_checkboxes(target, company_name="") -> int:
                 const groupMeta = members.map(m => metaText(m)).join(' ');
                 if (!groupNeedsSelection(groupMeta, members)) continue;
                 const preferred = members.find(m => isOtherMeta(metaText(m))) || members.find(m => !m.disabled) || null;
-                if (preferred && tryCheck(preferred)) n += 1;
+                if (preferred && tryCheck(preferred)) recordFix(preferred);
             }
 
             // Pass 4: ARIA checkbox/radio widgets.
@@ -6013,140 +6327,142 @@ async def handle_checkboxes(target, company_name="") -> int:
                 if (after === 'true') {
                     dispatch(el);
                     n += 1;
+                    details['Checkbox_' + meta.substring(0, 25).trim()] = 'checked';
                 }
             });
 
-            return n;
+            return details;
         }""")
-        fixed += int(changed or 0)
+        if isinstance(changed, dict):
+            fixed_details = changed
     except Exception:
         pass
 
-    if fixed > 0:
-        print(f"   [{company_name[:20]}] [CheckboxFix] Applied checkbox choices: {fixed}")
-    return fixed
-
-
-async def ensure_all_required_fields_filled(page, target, company_name="", url="", pitch="", subject="") -> int:
-    """
-    Final universal pass to ensure every required field in Shadow DOM or frames 
-    is filled before submission. Pierces Shadow DOM to find custom components.
-    """
-    fixed = 0
-    sources = [target]
-    if target != page:
-        sources.append(page)
-    for frame in page.frames:
-        try:
-            if frame.url and frame.url.startswith("http") and frame not in sources:
-                sources.append(frame)
-        except Exception:
-            continue
-
-    for src in sources:
-        try:
-            changed = await src.evaluate("""(cfg) => {
-                """ + SHADOW_DOM_PIERCING_SCRIPT + """
-
-                const dispatch = (el) => {
-                    ['input', 'change', 'blur', 'click'].forEach(evt => {
-                        try { el.dispatchEvent(new Event(evt, { bubbles: true })); } catch (e) {}
-                    });
-                };
-
-                const norm = (s) => String(s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-                const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-
-                const labelText = (el) => {
-                    try {
-                        if (el.id) {
-                            const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-                            if (lbl) return String(lbl.innerText || lbl.textContent || '').trim();
-                        }
-                    } catch (e) {}
-                    const wrap = el.closest('label');
-                    if (wrap) return String(wrap.innerText || wrap.textContent || '').trim();
-                    return '';
-                };
-
-                let n = 0;
-                const controls = shadowScan(document);
-
-                for (const el of controls) {
-                    if (el.disabled || el.readOnly) continue;
-                    
-                    const tag = (el.tagName || '').toLowerCase();
-                    const type = String(el.type || '').toLowerCase();
-                    const val = String(el.value || '').trim();
-                    
-                    // Already filled?
-                    if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
-                        if (el.checked) continue;
-                    } else {
-                        if (val.length > 0) continue;
-                    }
-
-                    // Is it required?
-                    let invalid = false;
-                    try { invalid = (typeof el.matches === 'function') && el.matches(':invalid'); } catch (e) {}
-                    const required = !!el.required || String(el.getAttribute('aria-required') || '').toLowerCase() === 'true';
-                    
-                    const parent = el.parentElement;
-                    const hasAsterisk = (parent && /(?:\\*|required)/i.test(parent.innerText || '')) || (parent && parent.parentElement && /(?:\\*|required)/i.test(parent.parentElement.innerText || ''));
-                    const label = labelText(el);
-                    const labelAsterisk = /(?:\\*|required)/i.test(label);
-
-                    if (!(required || invalid || hasAsterisk || labelAsterisk)) continue;
-
-                    // It is required and empty. Fill it.
-                    if (tag === 'select') {
-                        const ops = Array.from(el.options).filter(o => o.value && !/select|choose|placeholder|none/i.test(o.text));
-                        if (ops.length > 0) {
-                            el.value = ops[0].value;
-                            dispatch(el);
-                            n++;
-                        }
-                    } else if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
-                        el.checked = true;
-                        dispatch(el);
-                        n++;
-                    } else {
-                        // Text input heuristics
-                        const meta = (label + ' ' + (el.name||'') + ' ' + (el.id||'') + ' ' + (el.placeholder||'')).toLowerCase();
-                        let fillVal = 'N/A';
-                        if (meta.includes('organization') || meta.includes('company') || meta.includes('business')) fillVal = cfg.companyName || 'Business Inquiry';
-                        else if (meta.includes('website') || meta.includes('domain') || meta.includes('url')) fillVal = cfg.url || 'http://example.com';
-                        else if (meta.includes('industry')) fillVal = 'Technology';
-                        else if (meta.includes('role') || meta.includes('title')) fillVal = 'Manager';
-                        else if (meta.includes('country')) fillVal = 'United States';
-                        else if (meta.includes('city')) fillVal = 'New York';
-                        else if (meta.includes('state')) fillVal = 'NY';
-                        else if (meta.includes('subject')) fillVal = cfg.subject || 'General Inquiry';
-                        else if (meta.includes('how did you hear')) fillVal = 'Google Search';
-                        else if (meta.includes('phone') || meta.includes('mobile')) fillVal = '+15550199999';
-                        else if (meta.includes('name')) fillVal = 'John Doe';
-                        else if (meta.includes('email') || meta.includes('mail')) fillVal = 'contact@example.com';
-                        else if (meta.includes('message') || meta.includes('comment') || meta.includes('body')) fillVal = cfg.pitch || 'Interested in connecting.';
-                        
-                        el.value = fillVal;
-                        dispatch(el);
-                        n++;
-                    }
-                }
-                return n;
-            }""", {"companyName": company_name, "url": url, "pitch": pitch, "subject": subject})
-            fixed += int(changed or 0)
-        except Exception:
-            continue
-
-    if fixed > 0:
-        print(f"   [{company_name[:20]}] [UniversalAuditor] Filled {fixed} missing required field(s)")
-    return fixed
+    if fixed_details:
+        print(f"   [{company_name[:20]}] [CheckboxFix] Applied checkbox choices: {len(fixed_details)}")
+    return fixed_details
 
 
 # ============================================================
 #   SUBMIT
 # ============================================================
+
+
+async def ensure_all_required_fields_filled(page, target, pitch, subject, company_name="") -> dict:
+    """
+    Final Auditor: Pierces Shadow DOM to find and fill any mandatory fields (required, aria-required, *)
+    that GPT or heuristics might have missed. Provides a secondary safety net.
+    Returns a dictionary of the fields it filled.
+    """
+    fixed_details = {}
+    try:
+        changed = await target.evaluate(f"""() => {{
+            {SHADOW_DOM_PIERCING_SCRIPT}
+            
+            const dispatch = (el) => {{
+                ['input', 'change', 'blur', 'focus'].forEach(evt => {{
+                    try {{ el.dispatchEvent(new Event(evt, {{ bubbles: true }})); }} catch (e) {{}}
+                }});
+            }};
+
+            const norm = (s) => String(s || '').toLowerCase();
+            const allEls = getAllElements();
+            let n = 0;
+            let details = {{}};
+
+            allEls.forEach(el => {{
+                const tag = String(el.tagName || '').toLowerCase();
+                if (!['input', 'textarea', 'select'].includes(tag)) return;
+                
+                const type = String(el.type || '').toLowerCase();
+                if (['hidden', 'submit', 'button', 'file', 'date', 'datetime-local', 'month', 'week', 'time', 'number'].includes(type)) return;
+
+                const val = (el.value || '').trim();
+                const isRequired = el.required || el.getAttribute('aria-required') === 'true' || el.hasAttribute('required');
+                const labelText = (el.labels && el.labels[0]?.innerText) || el.placeholder || '';
+                const hasAsterisk = labelText.includes('*');
+
+                if ((isRequired || hasAsterisk) && !val) {{
+                    const meta = [el.name, el.id, labelText].join(' ').toLowerCase();
+                    const _fk_base = (el.name || el.id || labelText.trim().substring(0,20) || String(n));
+                    const fieldKey = 'UniversalAuditor_' + _fk_base;
+                    
+                    let fillVal = "";
+                    const isCountryCodeLike = meta.includes('country code') || meta.includes('dial code') || meta.includes('calling code') || meta.includes('isd') || meta.includes('phone code');
+                    if (meta.includes('first') && meta.includes('name')) fillVal = "{MY_FIRST_NAME}";
+                    else if (meta.includes('last') && meta.includes('name')) fillVal = "{MY_LAST_NAME}";
+                    else if (meta.includes('name') || meta.includes('contact person') || meta.includes('full name')) fillVal = "{MY_FULL_NAME}";
+                    else if (meta.includes('email') || meta.includes('mail')) fillVal = "{MY_EMAIL}";
+                    else if (meta.includes('phone') || meta.includes('mobile') || meta.includes('tel')) fillVal = isCountryCodeLike ? "{MY_COUNTRY_DIAL_CODE}" : "{MY_PHONE}";
+                    else if ((meta.includes('job') && meta.includes('title')) || meta.includes('designation') || meta.includes('position')) fillVal = "{MY_JOB_TITLE}";
+                    else if (meta.includes('subject') || meta.includes('topic')) fillVal = "{subject}";
+                    else if (meta.includes('company') || meta.includes('firm') || meta.includes('organisation') || meta.includes('organization') || meta.includes('business')) fillVal = "{company_name}" || "{MY_COMPANY}";
+                    else if (meta.includes('website') || meta.includes('url') || meta.includes('site')) fillVal = "{MY_WEBSITE}";
+                    else if (meta.includes('country') && !isCountryCodeLike) fillVal = "{MY_COUNTRY_NAME}";
+                    else if (meta.includes('zip') || meta.includes('postal') || meta.includes('pin')) fillVal = "{MY_PIN_CODE}";
+                    else if (meta.includes('address')) fillVal = "{MY_ADDRESS}";
+                    else if (tag === 'textarea' || meta.includes('message') || meta.includes('comment') || meta.includes('detail') || meta.includes('description') || meta.includes('project')) fillVal = "{pitch}";
+
+                    if (!fillVal) return;
+                    el.value = fillVal;
+                    details[fieldKey] = fillVal;
+
+                    dispatch(el);
+                    n += 1;
+                }}
+            }});
+            return details;
+        }}""")
+        if isinstance(changed, dict):
+            fixed_details = changed
+    except Exception as e:
+        print(f"   [{company_name[:20]}] [UniversalAuditor] Warning: {e}")
+    
+    if fixed_details:
+        print(f"   [{company_name[:20]}] [UniversalAuditor] Filled {len(fixed_details)} additional mandatory field(s)")
+    return fixed_details
+
+
+async def _run_semantic_fill_pass(page, target, pitch, subject, company_name="", form_data=None) -> int:
+    total_fixed = 0
+    checkbox_details = {}
+    checkbox_details.update(await handle_checkboxes(target, company_name) or {})
+    if target != page:
+        checkbox_details.update(await handle_checkboxes(page, company_name) or {})
+    for frame in page.frames:
+        try:
+            if not frame.url or not frame.url.startswith("http"):
+                continue
+            if frame == target:
+                continue
+            checkbox_details.update(await handle_checkboxes(frame, company_name) or {})
+        except Exception:
+            continue
+
+    total_fixed += len(checkbox_details)
+    if isinstance(form_data, dict) and checkbox_details:
+        form_data.update(checkbox_details)
+
+    total_fixed += await ensure_required_name_fields(page, target, subject, company_name)
+    total_fixed += await ensure_required_email_fields(page, target, company_name)
+    total_fixed += await ensure_required_subject_fields(page, target, subject, company_name)
+    total_fixed += await ensure_required_message_fields(page, target, pitch, company_name)
+
+    phone_ctx = await detect_visible_phone_controls(page, target, company_name)
+    if phone_ctx.get("present"):
+        total_fixed += await ensure_required_phone_fields(page, target, company_name)
+        total_fixed += await ensure_phone_country_code_dropdown(page, target, company_name)
+
+    total_fixed += await ensure_required_consent_checks(page, target, company_name)
+    total_fixed += await ensure_consent_by_heuristics(page, target, company_name)
+
+    captured_fields = await _capture_filled_form_values(page, target, max_items=90)
+    if isinstance(form_data, dict):
+        for field_key, field_value in captured_fields.items():
+            form_data.setdefault(field_key, field_value)
+
+    return total_fixed
+
 
 async def click_submit(target, page, company_name=""):
     tag = f"[{company_name[:20]}]"
@@ -6166,6 +6482,7 @@ async def click_submit(target, page, company_name=""):
         r"(submit|send|contact|enquir|inquir|request|quote|get\\s*started|get\\s*in\\s*touch|reach\\s*out|apply|book|schedule|talk\\s*to\\s*us|message\\s*us)",
         re.I,
     )
+
 
     async def _click_submit_candidate(locator) -> bool:
         try:
@@ -7790,8 +8107,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 )
 
 
-    form_data = {}
     captcha_status = "None"
+    form_data = {}
     bw = {
         "bytes": 0,
         "allowed": 0,
@@ -7818,11 +8135,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
     if not using_proxy:
         proxy_label = "DIRECT(env)"
     original_proxy_label = proxy_label
-    
-    # Metadata for reporting
-    effective_discovery_method = "direct"
-    effective_strategy = "N/A"
-    effective_form_url = url
 
     async def _new_context_page(use_proxy: bool):
         ctx_kwargs = {
@@ -7831,8 +8143,9 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/122.0.0.0 Safari/537.36"
             ),
-            # â”€â”€ Narrow viewport: stacks form columns vertically â”€â”€
-            # like the RXR screenshot â†’ form is isolated, easier to
+            "ignore_https_errors": True,
+            # ── Narrow viewport: stacks form columns vertically ──
+            # like the RXR screenshot → form is isolated, easier to
             # detect and fill without nav/sidebar noise.
             "viewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
             "permissions": [],
@@ -7891,6 +8204,13 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 
     context, page = await _new_context_page(use_proxy=using_proxy)
 
+    async def _safe_close():
+        try:
+            await context.close()
+            await browser.close()
+        except Exception:
+            pass
+
     try:
         for goto_attempt in range(3):  # retry up to 3 times
             try:
@@ -7925,8 +8245,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                             time_taken=_lead_time_taken(),
                         ))
                         _emit_result(company_name, url, "No", "ERR_NETWORK_CHANGED", "N/A", proxy_label, str(bw_kb), _lead_tokens())
-                        await context.close()
-                        await browser.close()
+                        await _safe_close()
                         return
                     continue
                 elif "Timeout" in err or "timeout" in err:
@@ -7947,7 +8266,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                     ),
                     timeout=discover_timeout,
                 )
-                effective_discovery_method = discover_method
                 discovered_url = _normalize_website_url(discovered_url) or url
                 if discovered_has_form:
                     if discovered_url != url:
@@ -7969,8 +8287,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 print(f"   [{company_name[:20]}] [ContactFinder] skipped: {type(e).__name__}")
 
         target, strategy = await find_form_target(page, url)
-        effective_strategy = strategy
-        effective_form_url = str(page.url or url)
         print(f"   [{company_name[:20]}] Form found via: {strategy}")
 
         # Keep the sheet's Contact Page URL aligned with the effective page
@@ -7996,20 +8312,30 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 
         filled, gpt_data = await gpt_fill_form(page, target, company_name, pitch, subject, worker_index) 
         if isinstance(gpt_data, dict):
-            for k, v in gpt_data.items():
-                form_data[k] = v
-        else:
-            gpt_data = {}
-        
-        # Ensure we don't proceed if gpt_fill_form failed completely in a non-recoverable way
-        if filled == 0 and not "fallback" in strategy:
-             print(f"   [{company_name[:20]}] GPT filled 0 fields - continuing with heuristics")
+            form_data.update(gpt_data)
 
         # Some sites keep required dropdowns empty despite successful text fills.
         dropdown_fixed = await ensure_required_dropdowns(page, target, company_name)
-        if dropdown_fixed > 0:
+        if isinstance(dropdown_fixed, dict) and dropdown_fixed:
+            filled += len(dropdown_fixed)
+            form_data.update(dropdown_fixed)
+        elif isinstance(dropdown_fixed, int) and dropdown_fixed > 0:
             filled += dropdown_fixed
-            form_data["_required_dropdowns"] = f"auto:{dropdown_fixed}"
+
+        # --- Universal Auditor Phase (Pre-Check) ---
+        auditor_fixed = await ensure_all_required_fields_filled(page, target, pitch, subject, company_name)
+        if isinstance(auditor_fixed, dict) and auditor_fixed:
+            filled += len(auditor_fixed)
+            if isinstance(form_data, dict):
+                form_data.update(auditor_fixed)
+        elif isinstance(auditor_fixed, int) and auditor_fixed > 0:
+            filled += auditor_fixed
+        # ---------------------------------------------
+
+        semantic_fixed = await _run_semantic_fill_pass(page, target, pitch, subject, company_name, form_data)
+        if semantic_fixed > 0:
+            filled += semantic_fixed
+            print(f"   [{company_name[:20]}] [SemanticRescue] Filled {semantic_fixed} additional field(s)")
 
         print(f"   [{company_name[:20]}] Fields filled: {filled}")
 
@@ -8022,7 +8348,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                         const controls = Array.from(document.querySelectorAll('input, textarea, select')).filter(el => {
                             const tag = (el.tagName || '').toLowerCase();
                             const type = String(el.type || '').toLowerCase();
-                            if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search', 'file'].includes(type)) return false;
+                            if (tag === 'input' && ['hidden', 'submit', 'button', 'image', 'reset', 'search', 'file', 'password'].includes(type)) return false;
 
                             const nm = String(el.name || el.id || el.placeholder || '').toLowerCase();
                             if (/\bsearch\b|sf_s|zip.?code|keyword|flexdata/.test(nm)) return false;
@@ -8042,6 +8368,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 
                 no_form_reason = "Contact us form not found"
                 if int(form_probe.get("controls", 0) or 0) > 0 or bool(form_probe.get("iframe_like", False)):
+                    no_form_reason = "Form detected but no relevant fields could be filled"
                     print(
                         f"   [{company_name[:20]}] Form-like controls detected but none were fillable; "
                         f"recording as: {no_form_reason}"
@@ -8055,8 +8382,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                     _lead_tokens(), message_sent=pitch, subject_text=subject,
                     time_taken=_lead_time_taken(),
                 ))
-                _emit_result(company_name, url, "No", no_form_reason, "N/A", proxy_label, str(bw_kb), _lead_tokens(), message_sent=pitch, 
-                             strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
+                _emit_result(company_name, url, "No", no_form_reason, "N/A", proxy_label, str(bw_kb), _lead_tokens(), message_sent=pitch)
                 await context.close()
                 await browser.close()
                 return
@@ -8083,8 +8409,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                         subject_text=subject,
                         time_taken=_lead_time_taken(),
                     ))
-                    _emit_result(company_name, url, "Yes" if ok else "No", "Skyvern submitted" if ok else "Skyvern failed", "N/A", proxy_label, str(bw_kb), _lead_tokens(),
-                                 strategy="skyvern", discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
+                    _emit_result(company_name, url, "Yes" if ok else "No", "Skyvern submitted" if ok else "Skyvern failed", "N/A", proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data)
                     return
 
             bw_kb = round(bw["bytes"] / 1024, 1)
@@ -8095,67 +8420,12 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", "Filled 0 fields", "N/A", proxy_label, str(bw_kb), _lead_tokens(),
-                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
-            await context.close()
-            await browser.close()
+            _emit_result(company_name, url, "No", "Filled 0 fields", "N/A", proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data)
+            await _safe_close()
             return
 
-        checkbox_fixed = 0
-        checkbox_fixed += await handle_checkboxes(target, company_name)
-        if target != page:
-            checkbox_fixed += await handle_checkboxes(page, company_name)
-        for frame in page.frames:
-            try:
-                if not frame.url or not frame.url.startswith("http"):
-                    continue
-                if frame == target:
-                    continue
-                checkbox_fixed += await handle_checkboxes(frame, company_name)
-            except Exception:
-                continue
-
-        name_fixed = await ensure_required_name_fields(page, target, subject, company_name)
-        email_fixed = await ensure_required_email_fields(page, target, company_name)
-        subject_fixed = await ensure_required_subject_fields(page, target, subject, company_name)
-        message_fixed = await ensure_required_message_fields(page, target, pitch, company_name)
-        phone_ctx = await detect_visible_phone_controls(page, target, company_name)
-        if phone_ctx.get("present"):
-            phone_fixed = await ensure_required_phone_fields(page, target, company_name)
-            phone_country_fixed = await ensure_phone_country_code_dropdown(page, target, company_name)
-        else:
-            phone_fixed = 0
-            phone_country_fixed = 0
-        consent_fixed = await ensure_required_consent_checks(page, target, company_name)
-        consent_heur_fixed = await ensure_consent_by_heuristics(page, target, company_name)
-        
-        # Universal Auditor: Final pass to ensure all required fields in shadow DOM or frames are filled.
-        universal_fixed = await ensure_all_required_fields_filled(page, target, company_name, url, pitch, subject)
-        
-        captured_fields = await _capture_filled_form_values(page, target, max_items=90)
-        for field_key, field_value in captured_fields.items():
-            form_data.setdefault(field_key, field_value)
-
-        if checkbox_fixed > 0:
-            form_data["_auto_checkboxes"] = f"auto:{checkbox_fixed}"
-        if name_fixed > 0:
-            form_data["_required_name"] = f"auto:{name_fixed}"
-        if email_fixed > 0:
-            form_data["_required_email"] = f"auto:{email_fixed}"
-        if subject_fixed > 0:
-            form_data["_required_subject"] = f"auto:{subject_fixed}"
-        if message_fixed > 0:
-            form_data["_required_message"] = f"auto:{message_fixed}"
-        if phone_fixed > 0:
-            form_data["_required_phone"] = f"auto:{phone_fixed}"
-        if phone_country_fixed > 0:
-            form_data["_phone_country_code"] = f"auto:{phone_country_fixed}"
-        if consent_fixed > 0:
-            form_data["_required_consents"] = f"auto:{consent_fixed}"
-        if consent_heur_fixed > 0:
-            form_data["_consent_heuristics"] = f"auto:{consent_heur_fixed}"
-        if universal_fixed > 0:
-            form_data["_universal_required_fix"] = f"auto:{universal_fixed}"
+        # Note: actual filled field values are already captured by
+        # _capture_filled_form_values and checkbox details above.
         await page.evaluate("""() => {
             if (document.body) window.scrollTo(0, document.body.scrollHeight);
         }""")
@@ -8173,8 +8443,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         except Exception as e:
             if _STOP_FLAG.is_set():
                 print("   [Captcha] Stop flag active - skipping error emit")
-                await context.close()
-                await browser.close()
+                await _safe_close()
                 return
 
             captcha_status = f"Error:{str(e)[:40]}"
@@ -8189,13 +8458,16 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 filled_fields=form_data, message_sent=pitch, subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", f"Captcha error: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch,
-                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
-            await context.close()
-            await browser.close()
+            _emit_result(company_name, url, "No", f"Captcha error: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch)
+            await _safe_close()
             return
 
-        if (not cap_solved or 'timeout' in captcha_status or 'no-sitekey' in captcha_status or 'cloudflare-challenge-page' in captcha_status):
+        # â”€â”€ Captcha timeout/failed â†’ skip submit, mark No â”€â”€â”€â”€
+        if (
+            "timeout" in captcha_status
+            or "no-sitekey" in captcha_status
+            or "cloudflare-challenge-page" in captcha_status
+        ):
             _nopecha_log(
                 f"[Captcha] submit skipped company={company_name[:40]} reason={captcha_status}"
             )
@@ -8208,13 +8480,16 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 filled_fields=form_data, message_sent=pitch, subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", f"Captcha not solved: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch,
-                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
-            await context.close()
-            await browser.close()
+            _emit_result(company_name, url, "No", f"Captcha not solved: {captcha_status}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch)
+            await _safe_close()
             return
 
         await asyncio.sleep(random.uniform(0.5, 1.2))
+
+        # â”€â”€ Real-time Capture: Store field values BEFORE clicking submit to avoid loss via redirect â”€â”€
+        latest_captured_fields = await _capture_filled_form_values(page, target, max_items=90)
+        for field_key, field_value in latest_captured_fields.items():
+            form_data.setdefault(field_key, field_value)
 
         pre_url = page.url
         submission_probe = _new_submission_probe(bw)
@@ -8223,8 +8498,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         if not submitted:
             submit_hint = str(submit_method or "not_found")[:140]
             submit_fail_reason = f"Submit button not found (fields_filled={filled}; {submit_hint})"
-            if isinstance(form_data, dict):
-                form_data["_submit_fallback"] = submit_fail_reason
             print(
                 f"   [{company_name[:20]}] Submit not found -> recording as failure"
             )
@@ -8236,10 +8509,8 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 filled_fields=form_data, message_sent=pitch, subject_text=subject,
                 time_taken=_lead_time_taken(),
             ))
-            _emit_result(company_name, url, "No", submit_fail_reason, captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch,
-                         strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
-            await context.close()
-            await browser.close()
+            _emit_result(company_name, url, "No", submit_fail_reason, captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data, message_sent=pitch)
+            await _safe_close()
             return
 
         print(f"   [{company_name[:20]}] Submitted via: {submit_method}")
@@ -8252,19 +8523,21 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
 
         # One targeted retry for native consent-checkbox validation failures.
         if status == "No" and re.search(r"check this box|checkbox|consent|terms|privacy|agree", str(assurance or ""), re.I):
-            retry_checkbox_fixed = 0
-            retry_checkbox_fixed += await handle_checkboxes(target, company_name)
+            retry_checkbox_details = {}
+            retry_checkbox_details.update(await handle_checkboxes(target, company_name) or {})
             if target != page:
-                retry_checkbox_fixed += await handle_checkboxes(page, company_name)
+                retry_checkbox_details.update(await handle_checkboxes(page, company_name) or {})
             for frame in page.frames:
                 try:
                     if not frame.url or not frame.url.startswith("http"):
                         continue
                     if frame == target:
                         continue
-                    retry_checkbox_fixed += await handle_checkboxes(frame, company_name)
+                    retry_checkbox_details.update(await handle_checkboxes(frame, company_name) or {})
                 except Exception:
                     continue
+            retry_checkbox_fixed = len(retry_checkbox_details)
+            form_data.update(retry_checkbox_details)
 
             retry_fixed = await ensure_required_consent_checks(page, target, company_name)
             heuristic_fixed = await ensure_consent_by_heuristics(page, target, company_name)
@@ -8419,10 +8692,13 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         # One targeted retry for dropdown/listbox validation failures.
         if status == "No" and re.search(r"dropdown|drop\s*down|select|choose\s+(an?\s+)?option|cannot\s+be\s+blank|please\s+select", str(assurance or ""), re.I):
             retry_dropdown_fixed = await ensure_required_dropdowns(page, target, company_name)
-            if retry_dropdown_fixed > 0:
+            retry_dropdown_count = len(retry_dropdown_fixed) if isinstance(retry_dropdown_fixed, dict) else (retry_dropdown_fixed if isinstance(retry_dropdown_fixed, int) else 0)
+            if isinstance(retry_dropdown_fixed, dict) and retry_dropdown_fixed:
+                form_data.update(retry_dropdown_fixed)
+            if retry_dropdown_count > 0:
                 print(
                     f"   [{company_name[:20]}] Retrying submit after dropdown validation "
-                    f"(dropdowns={retry_dropdown_fixed})..."
+                    f"(dropdowns={retry_dropdown_count})..."
                 )
                 await asyncio.sleep(0.6)
                 retry_pre_url = page.url
@@ -8444,21 +8720,26 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         # One targeted retry for generic validation banners like:
         # "One or more fields have an error".
         if status == "No" and re.search(r"one or more fields have an error|fields have an error|form validation failed|please correct (?:the )?errors?", str(assurance or ""), re.I):
-            retry_checkbox_fixed = 0
-            retry_checkbox_fixed += await handle_checkboxes(target, company_name)
+            retry_checkbox_details = {}
+            retry_checkbox_details.update(await handle_checkboxes(target, company_name) or {})
             if target != page:
-                retry_checkbox_fixed += await handle_checkboxes(page, company_name)
+                retry_checkbox_details.update(await handle_checkboxes(page, company_name) or {})
             for frame in page.frames:
                 try:
                     if not frame.url or not frame.url.startswith("http"):
                         continue
                     if frame == target:
                         continue
-                    retry_checkbox_fixed += await handle_checkboxes(frame, company_name)
+                    retry_checkbox_details.update(await handle_checkboxes(frame, company_name) or {})
                 except Exception:
                     continue
+            retry_checkbox_fixed = len(retry_checkbox_details)
+            form_data.update(retry_checkbox_details)
 
-            retry_dropdown_fixed = await ensure_required_dropdowns(page, target, company_name)
+            retry_dropdown_details = await ensure_required_dropdowns(page, target, company_name)
+            retry_dropdown_fixed = len(retry_dropdown_details) if isinstance(retry_dropdown_details, dict) else (retry_dropdown_details if isinstance(retry_dropdown_details, int) else 0)
+            if isinstance(retry_dropdown_details, dict) and retry_dropdown_details:
+                form_data.update(retry_dropdown_details)
             retry_name_fixed = await ensure_required_name_fields(page, target, subject, company_name)
             retry_email_fixed = await ensure_required_email_fields(page, target, company_name)
             retry_subject_fixed = await ensure_required_subject_fields(page, target, subject, company_name)
@@ -8473,13 +8754,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             retry_consent_fixed = await ensure_required_consent_checks(page, target, company_name)
             retry_consent_heur_fixed = await ensure_consent_by_heuristics(page, target, company_name)
 
-            if isinstance(form_data, dict):
-                form_data["_validation_retry"] = (
-                    f"cb:{retry_checkbox_fixed},dd:{retry_dropdown_fixed},nm:{retry_name_fixed},em:{retry_email_fixed},sb:{retry_subject_fixed},"
-                    f"msg:{retry_message_fixed},"
-                    f"ph:{retry_phone_fixed},cc:{retry_phone_country_fixed},"
-                    f"cons:{retry_consent_fixed},heur:{retry_consent_heur_fixed}"
-                )
 
             print(
                 f"   [{company_name[:20]}] Retrying submit after generic validation "
@@ -8506,21 +8780,28 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
         # Final precautionary sweep: run one last broad fix pass even when the
         # failure text is vague or site-specific, then retry submit once.
         if status == "No":
-            precaution_checkbox_fixed = 0
-            precaution_checkbox_fixed += await handle_checkboxes(target, company_name)
+            retry_auditor_fixed = await ensure_all_required_fields_filled(page, target, pitch, subject, company_name)
+            precaution_checkbox_details = {}
+            precaution_checkbox_details.update(await handle_checkboxes(target, company_name) or {})
             if target != page:
-                precaution_checkbox_fixed += await handle_checkboxes(page, company_name)
+                precaution_checkbox_details.update(await handle_checkboxes(page, company_name) or {})
             for frame in page.frames:
                 try:
                     if not frame.url or not frame.url.startswith("http"):
                         continue
                     if frame == target:
                         continue
-                    precaution_checkbox_fixed += await handle_checkboxes(frame, company_name)
+                    precaution_checkbox_details.update(await handle_checkboxes(frame, company_name) or {})
                 except Exception:
                     continue
+            precaution_checkbox_fixed = len(precaution_checkbox_details)
+            form_data.update(precaution_checkbox_details)
 
-            precaution_dropdown_fixed = await ensure_required_dropdowns(page, target, company_name)
+            precaution_dropdown_details = await ensure_required_dropdowns(page, target, company_name)
+            precaution_dropdown_fixed = len(precaution_dropdown_details) if isinstance(precaution_dropdown_details, dict) else (precaution_dropdown_details or 0)
+            if isinstance(precaution_dropdown_details, dict):
+                form_data.update(precaution_dropdown_details)
+
             precaution_name_fixed = await ensure_required_name_fields(page, target, subject, company_name)
             precaution_email_fixed = await ensure_required_email_fields(page, target, company_name)
             precaution_subject_fixed = await ensure_required_subject_fields(page, target, subject, company_name)
@@ -8547,14 +8828,6 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 + precaution_consent_fixed
                 + precaution_consent_heur_fixed
             )
-
-            if isinstance(form_data, dict):
-                form_data["_precautionary_retry"] = (
-                    f"cb:{precaution_checkbox_fixed},dd:{precaution_dropdown_fixed},nm:{precaution_name_fixed},"
-                    f"em:{precaution_email_fixed},sb:{precaution_subject_fixed},msg:{precaution_message_fixed},"
-                    f"ph:{precaution_phone_fixed},cc:{precaution_phone_country_fixed},"
-                    f"cons:{precaution_consent_fixed},heur:{precaution_consent_heur_fixed}"
-                )
 
             if precaution_total > 0:
                 print(
@@ -8604,8 +8877,7 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             subject_text=subject,
             time_taken=_lead_time_taken(),
         ))
-        _emit_result(company_name, url, status, assurance, captcha_status, proxy_label, str(bw_kb), tok_cols, filled_fields=form_data, sub_status=status, confirmation_msg=assurance, message_sent=pitch,
-                     strategy=effective_strategy, discovery_method=effective_discovery_method, detected_form_url=effective_form_url)
+        _emit_result(company_name, url, status, assurance, captcha_status, proxy_label, str(bw_kb), tok_cols, filled_fields=form_data, sub_status=status, confirmation_msg=assurance, message_sent=pitch)
 
         token_tracker.print_summary()
 
@@ -8616,17 +8888,22 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
                 f"reason={str(e).replace(chr(10), ' ')[:180]} note=retry may trigger a new captcha solve"
             )
             print(f"   [{company_name[:20]}] Retrying: {str(e)[:60]}")
-            await context.close()
-            await browser.close()
+            try:
+                await context.close()
+                await browser.close()
+            except Exception:
+                pass
             return await process_form(pw, company_name, url, sheet, lead_index, total,
-                                      
                                       attempt=2, worker_index=worker_index,
                                       _lead_snapshot=lead_snapshot)
         print(f"   [{company_name[:20]}] FAILED: {e}")
         if _STOP_FLAG.is_set():
             print(f"   [{company_name[:20]}] Stop flag active - skipping error emit")
-            await context.close()
-            await browser.close()
+            try:
+                await context.close()
+                await browser.close()
+            except Exception:
+                pass
             return
             
         bw_kb = round(bw["bytes"] / 1024, 1)
@@ -8637,10 +8914,13 @@ async def process_form(pw, company_name, url, sheet, lead_index, total,
             subject_text=subject,
             time_taken=_lead_time_taken(),
         ))
-        _emit_result(company_name, url, "No", f"Error: {str(e)[:100]}", captcha_status, proxy_label, str(bw_kb), _lead_tokens())
+        _emit_result(company_name, url, "No", f"Error: {str(e)[:100]}", captcha_status, proxy_label, str(bw_kb), _lead_tokens(), filled_fields=form_data)
 
-    await context.close()
-    await browser.close()
+    try:
+        await context.close()
+        await browser.close()
+    except Exception:
+        pass
     cd = random.uniform(2, 5)
     print(f"   [{company_name[:20]}] Cooldown {cd:.1f}s...")
     await asyncio.sleep(cd)
@@ -8949,7 +9229,15 @@ def _extract_lead_company_url(lead: dict, lead_index: int) -> tuple[str, str]:
 
 def _build_resume_signature(leads: list, csv_path=None) -> str:
     h = hashlib.sha1()
-    h.update(str(csv_path or "__DEFAULT_COMPANIES__").encode("utf-8", "ignore"))
+    # Normalize csv_path so relative vs absolute differences don't change the signature
+    if csv_path:
+        try:
+            sig_csv = os.path.normcase(os.path.abspath(str(csv_path)))
+        except Exception:
+            sig_csv = str(csv_path)
+    else:
+        sig_csv = "__DEFAULT_COMPANIES__"
+    h.update(str(sig_csv).encode("utf-8", "ignore"))
     h.update(f"|{len(leads)}|".encode("utf-8", "ignore"))
 
     for i, lead in enumerate(leads, 1):
@@ -8984,8 +9272,11 @@ def _load_resume_bookmark(run_signature: str, total: int) -> int:
         return 0
 
     if not isinstance(state, dict):
+        print(f"[Bookmark] Invalid bookmark format (not a dict) at: {path}")
         return 0
-    if state.get("run_signature") != run_signature:
+    stored_sig = state.get("run_signature")
+    if stored_sig != run_signature:
+        print(f"[Bookmark] Run signature mismatch: stored={stored_sig!r} current={run_signature!r} path={path}")
         return 0
 
     # Resume now follows attempted cursor so run continues from where it stopped,
@@ -9157,6 +9448,7 @@ async def main():
         return
 
     run_signature = _build_resume_signature(leads, csv_path)
+    print(f"[Bookmark] Computed run_signature: {run_signature}")
     bookmark_start_cursor = _load_resume_bookmark(run_signature, total)
     start_index = bookmark_start_cursor + 1
 
